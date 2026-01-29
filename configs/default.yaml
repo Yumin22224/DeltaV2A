@@ -1,0 +1,90 @@
+# DeltaV2A Default Configuration
+
+# Project paths
+project:
+  name: "DeltaV2A"
+  root_dir: "/Users/heoyumin/Projects/Python/DeltaV2A"
+  data_dir: "${project.root_dir}/data"
+  output_dir: "${project.root_dir}/outputs"
+  checkpoint_dir: "${project.root_dir}/checkpoints"
+  log_dir: "${project.root_dir}/logs"
+
+# Data configuration
+data:
+  image:
+    resolution: 512
+    channels: 3
+    mean: [0.485, 0.456, 0.406]  # ImageNet stats
+    std: [0.229, 0.224, 0.225]
+  audio:
+    sample_rate: 16000
+    hop_length: 160
+    n_mels: 64
+    n_fft: 1024
+    target_lufs: -14
+    segment_length: 16  # beats (8-bar)
+    mel_time_steps: 800  # T_mel
+
+# Model architecture
+model:
+  # Head taxonomy
+  num_heads: 6
+  head_names: ["rhythm", "harmony", "energy", "timbre", "space", "texture"]
+  head_dim: 64
+
+  # Visual encoder
+  visual:
+    low_level_dim: 256
+    high_level_dim: 512  # CLIP dim
+    delta_dim: 512
+
+  # Prior
+  prior:
+    alpha: 0.3  # hard/soft balance
+    entropy_min: 0.5
+    sparsity_max: 5.0
+    epsilon_prior: 0.5  # δC constraint
+
+  # Delta mapping
+  delta_mapping:
+    inertia_epsilon: 1.0e-3
+
+  # Audio generator
+  audio_generator:
+    backbone: "audioldm"
+    pretrained: true
+    use_lora: true
+    lora_rank: 4
+
+# Training general
+training:
+  seed: 42
+  num_workers: 4
+  pin_memory: true
+  mixed_precision: true
+  gradient_clip: 1.0
+
+# Optimizer
+optimizer:
+  name: "AdamW"
+  lr: 1.0e-4
+  weight_decay: 1.0e-2
+  betas: [0.9, 0.999]
+
+# Scheduler
+scheduler:
+  name: "CosineAnnealingLR"
+  T_max: 100
+  eta_min: 1.0e-6
+
+# Logging
+logging:
+  use_wandb: true
+  wandb_project: "DeltaV2A"
+  log_every_n_steps: 10
+  save_every_n_epochs: 5
+
+# Hardware
+hardware:
+  device: "cuda"  # Will be set to 'cpu' if CUDA unavailable
+  num_gpus: 1

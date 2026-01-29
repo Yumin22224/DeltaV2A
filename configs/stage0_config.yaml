@@ -1,0 +1,85 @@
+# Stage 0: Prior Construction
+# This stage constructs the valid coupling space and C_prior estimator
+
+defaults:
+  - default
+
+stage: 0
+stage_name: "prior_construction"
+
+# Data for Stage 0
+data:
+  dataset_type: "high_similarity"
+  dataset_path: "${project.data_dir}/high_similarity_pairs"
+  num_samples: 10000
+  similarity_threshold: 0.95  # Top 5% similarity
+  batch_size: 32
+
+# Hard Prior (Type-II Rules), manually defined (need to add more)
+hard_prior:
+  num_rules: 10
+  rules:
+    # Rule format: (f_v, f_a, rho_expected, h_target, w_r)
+    - name: "brightness_to_spectral_centroid"
+      visual_feature: "brightness"
+      audio_feature: "spectral_centroid"
+      correlation: 1.0  # positive
+      target_head: "timbre"
+      weight: 1.0
+
+    - name: "motion_to_tempo"
+      visual_feature: "optical_flow_magnitude"
+      audio_feature: "tempo"
+      correlation: 1.0
+      target_head: "rhythm"
+      weight: 1.0
+
+    - name: "blur_to_reverb"
+      visual_feature: "blur_amount"
+      audio_feature: "reverb_time"
+      correlation: 1.0
+      target_head: "space"
+      weight: 1.0
+
+    - name: "contrast_to_dynamic_range"
+      visual_feature: "contrast"
+      audio_feature: "dynamic_range"
+      correlation: 1.0
+      target_head: "energy"
+      weight: 1.0
+
+    - name: "saturation_to_harmonic_richness"
+      visual_feature: "saturation"
+      audio_feature: "harmonic_richness"
+      correlation: 1.0
+      target_head: "harmony"
+      weight: 1.0
+
+# Soft Prior (ImageBind)
+soft_prior:
+  model_name: "imagebind"
+  pretrained: true
+  freeze: true
+
+  # Head queries initialization
+  head_queries:
+    init_method: "clip_text"  # or "random"
+    text_prompts:
+      rhythm: "rhythmic pattern and tempo"
+      harmony: "harmonic content and chords"
+      energy: "energy and dynamics"
+      timbre: "timbre and tone quality"
+      space: "reverb and spatial characteristics"
+      texture: "texture and noise qualities"
+
+# Validation
+validation:
+  min_correlation: 0.5  # Minimum Spearman correlation for Type-II rules
+  check_entropy: true
+  check_sparsity: true
+
+# Output
+output:
+  save_prior_estimator: true
+  save_statistics: true
+  output_path: "${project.checkpoint_dir}/stage0"

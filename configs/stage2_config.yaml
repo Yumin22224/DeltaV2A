@@ -1,0 +1,144 @@
+# Stage 2: Cross-Modal Mapping
+# Learn visual delta to audio control mapping
+
+defaults:
+  - default
+
+stage: 2
+stage_name: "cross_modal_mapping"
+
+# Data for Stage 2
+data:
+  dataset_type: "cross_modal"
+  dataset_path: "${project.data_dir}/cross_modal_triplets"
+  num_samples: 20000
+  batch_size: 8  # Smaller due to generation
+
+# Load pretrained components
+pretrained:
+  prior_estimator: "${project.checkpoint_dir}/stage0/prior_estimator.pt"
+  s_proxy_stats: "${project.checkpoint_dir}/stage1/S_proxy_statistics.pt"
+  audio_generator: "${project.checkpoint_dir}/stage1/generator_best.pt"
+
+# Training phases
+training:
+  # Phase 2-A: g only (no generation)
+  phase_2a:
+    epochs: 100
+    learning_rate: 1.0e-4
+    freeze_generator: true
+    num_samples_per_input: 1
+    loss_weights:
+      identity: 0.5
+      manifold: 0.3
+      softhead: 0.2
+      monotonic: 0.0  # Optional
+
+  # Phase 2-B: end-to-end with generation
+  phase_2b:
+    epochs: 150
+    learning_rate: 5.0e-5
+    freeze_generator: false
+    use_lora: true
+    num_samples_per_input: 4  # K=4 samples
+    loss_weights:
+      preserve: 0.3
+      coherence: 0.4
+      consistency: 0.2
+      rank: 0.1
+
+# Model components
+model:
+  # Visual Delta Encoder
+  visual_encoder:
+    low_level:
+      backbone: "resnet18"
+      output_dim: 256
+    high_level:
+      backbone: "clip"
+      model_name: "ViT-B/32"
+      output_dim: 512
+
+  # Delta Mapping Module
+  delta_mapping:
+    delta_dim: 512
+    num_heads: 6
+    head_dim: 64
+    hidden_dim: 256
+    inertia_epsilon: 1.0e-3
+
+  # P_align (Manifold Projection)
+  p_align:
+    per_head: true
+    use_statistics: true  # Use S_proxy statistics
+
+# Losses
+losses:
+  # Phase 2-A specific
+  identity:
+    weight: 0.5
+    test_ratio: 0.1  # 10% of batch
+
+  manifold:
+    weight: 0.3
+    use_statistics: true
+
+  softhead:
+    entropy_weight: 0.1
+    sparsity_weight: 0.1
+
+  monotonic:
+    weight: 0.0
+    margin: 0.1
+
+  # Phase 2-B specific
+  preserve:
+    weight: 0.3
+    beta: 1.0
+    heads: ["rhythm", "harmony", "energy"]
+
+  coherence:
+    weight: 0.4
+    high_level_weight: 1.0
+    low_level_weight: 0.5
+    margin: 0.1  # kappa
+    active_threshold: 0.1  # eta
+
+  consistency:
+    weight: 0.2
+    struct_heads: ["rhythm", "harmony", "energy"]
+    style_heads: ["timbre", "space", "texture"]
+    target_diversity: 0.15  # nu_h
+
+  rank:
+    weight: 0.1
+    type: "spearman"
+
+# Hard Prior Rules (for coherence loss)
+hard_prior_rules:
+  use_rules: true
+  rules_file: "${project.checkpoint_dir}/stage0/rules.yaml"
+
+# Output
+output:
+  save_visual_encoder: true
+  save_delta_mapping: true
+  save_generator_lora: true
+  output_path: "${project.checkpoint_dir}/stage2"
+
+# Validation
+validation:
+  val_split: 0.1
+  val_every_n_epochs: 5
+  metrics:
+    min_preserve_rhythm: 0.85
+    min_preserve_harmony: 0.85
+    min_coherence: 0.5
+    min_consistency: 0.8
+    min_rank_spearman: 0.7
+
+# Inference settings
+inference:
+  noise_level: 0.5  # Default diffusion noise (0.3-0.7)
+  num_inference_steps: 50
+  guidance_scale: 7.5
