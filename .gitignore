@@ -1,0 +1,29 @@
+# 가상환경 제외 (가장 중요!)
+venv_DeltaV2A/
+venv/
+env/
+.env
+
+# 파이썬 컴파일 파일 제외
+__pycache__/
+*.py[cod]
+
+# 데이터셋 및 모델 가중치 파일 제외 (용량 큼)
+# (이건 구글 드라이브나 별도 스토리지로 관리해야 함)
+data/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+outputs/
+logs/
+
+# Jupyter Notebook/Colab 체크포인트 제외
+.ipynb_checkpoints/
+
+# OS 생성 파일 제외
+.DS_Store
+Thumbs.db
+
+# VS Code 설정 폴더 제외
+.vscode/
