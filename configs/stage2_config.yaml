@@ -9,10 +9,18 @@ stage_name: "cross_modal_mapping"
 
 # Data for Stage 2
 data:
-  dataset_type: "cross_modal"
-  dataset_path: "${project.data_dir}/cross_modal_triplets"
-  num_samples: 20000
-  batch_size: 8  # Smaller due to generation
+  # Cross-modal dataset (2-A, 2-B)
+  cross_modal:
+    dataset_path: "${project.data_dir}/cross_modal_triplets"
+    num_samples: 20000
+    batch_size: 8  # Smaller due to generation
+
+  # Subjectivity dataset (2-C)
+  subjectivity:
+    dataset_path: "${project.data_dir}/subjectivity_space"
+    num_samples: 3000
+    batch_size: 4
+    min_validity: 0.6  # Minimum validity score for candidates
 
 # Load pretrained components
 pretrained:
@@ -29,10 +37,10 @@ training:
     freeze_generator: true
     num_samples_per_input: 1
     loss_weights:
-      identity: 0.5
-      manifold: 0.3
-      softhead: 0.2
-      monotonic: 0.0  # Optional
+      pseudo: 0.3
+      manifold: 0.4
+      identity: 0.2
+      mono: 0.1
 
   # Phase 2-B: end-to-end with generation
   phase_2b:
@@ -47,6 +55,19 @@ training:
       consistency: 0.2
       rank: 0.1
 
+  # Phase 2-C: subjectivity space learning
+  phase_2c:
+    epochs: 50
+    learning_rate: 1.0e-4
+    freeze_s_encoder: true
+    freeze_prior_estimator: true
+    num_valid_candidates: 5  # Sample multiple valid interpretations
+    loss_weights:
+      direction: 0.5
+      manifold: 0.2
+      bounded: 0.2
+      prior: 0.1
+
 # Model components
 model:
   # Visual Delta Encoder
@@ -56,7 +77,7 @@ model:
       output_dim: 256
     high_level:
       backbone: "clip"
-      model_name: "ViT-B/32"
+      model_name: "ViT-L/14"
       output_dim: 512
 
   # Delta Mapping Module
@@ -72,24 +93,35 @@ model:
     per_head: true
     use_statistics: true  # Use S_proxy statistics
 
+  # δC Predictor (Stage 2-C)
+  delta_c_predictor:
+    visual_dim: 512  # CLIP embedding
+    audio_dim: 512   # CLAP embedding
+    hidden_dim: 512
+    output_dim: 1536  # N_v * 6 = 256 * 6
+    N_v: 256
+    num_heads: 6
+
 # Losses
 losses:
   # Phase 2-A specific
-  identity:
-    weight: 0.5
-    test_ratio: 0.1  # 10% of batch
+  pseudo:
+    weight: 0.3
+    use_huber: true
+    huber_delta: 1.0
 
   manifold:
-    weight: 0.3
+    weight: 0.4
     use_statistics: true
+    moment_matching: true
 
-  softhead:
-    entropy_weight: 0.1
-    sparsity_weight: 0.1
+  identity:
+    weight: 0.2
+    test_ratio: 0.1  # 10% of batch
 
-  monotonic:
-    weight: 0.0
-    margin: 0.1
+  mono:
+    weight: 0.1
+    margin: 0.0
 
   # Phase 2-B specific
   preserve:
@@ -101,18 +133,33 @@ losses:
     weight: 0.4
     high_level_weight: 1.0
     low_level_weight: 0.5
-    margin: 0.1  # kappa
-    active_threshold: 0.1  # eta
+    kappa: 0.0  # margin
+    eta_r: 0.1  # active threshold
 
   consistency:
     weight: 0.2
     struct_heads: ["rhythm", "harmony", "energy"]
     style_heads: ["timbre", "space", "texture"]
-    target_diversity: 0.15  # nu_h
+    nu_h: 0.05  # minimum diversity
+    max_struct_var: 0.1
 
   rank:
     weight: 0.1
-    type: "spearman"
+    type: "pairwise"
+
+  # Phase 2-C specific
+  direction:
+    weight: 0.5
+    use_s_encoder: true
+
+  bounded:
+    weight: 0.2
+    max_struct_var: 0.1
+    min_style_var: 0.05
+
+  prior_reg:
+    weight: 0.1
+    epsilon_prior: 0.5
 
 # Hard Prior Rules (for coherence loss)
 hard_prior_rules:

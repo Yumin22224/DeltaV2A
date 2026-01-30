@@ -7,10 +7,12 @@
 본 시스템은 (I_init, A_init) 초기 쌍이 주어졌을 때, 사용자의 이미지 편집 I_edit을 받아 오디오의 구조는 보존하면서 스타일을 변환(A_edit)하는 것을 목표로 합니다.
 
 ### 핵심 특징
-- **Prior-Guided Learning**: Type-II rules와 ImageBind 기반의 soft prior를 결합
+- **Prior-Guided Learning**: 문헌 기반 Type-II rules (r1-r12)와 ImageBind soft prior 결합
 - **Delta-Conditioned Mapping**: 시각적 변화(ΔV)를 청각적 제어 신호로 변환
 - **Structure Preservation**: 오디오의 리듬, 하모니, 에너지 등 구조적 요소 보존
 - **Style Steering**: Timbre, Space, Texture 등 스타일 요소 변환
+- **HuggingFace AudioLDM**: 사전학습된 오디오 생성 모델 활용 (맥북에서도 실행 가능)
+- **Subjectivity Space**: 여러 유효한 해석 탐색 가능 (Stage 2-C)
 
 ## 프로젝트 구조
 
@@ -63,7 +65,8 @@ pip install -r requirements.txt
 - torchaudio, torchvision
 - librosa, soundfile (오디오 처리)
 - open_clip_torch, laion-clap (멀티모달)
-- diffusers (AudioLDM)
+- **diffusers** (HuggingFace AudioLDM - 맥북에서 실행 가능)
+- **peft** (LoRA adaptation)
 - pytorch-lightning (학습)
 
 ## 시스템 아키텍처
@@ -71,7 +74,7 @@ pip install -r requirements.txt
 ### Stage 0: Prior 구성
 Valid coupling space 정의 및 C_prior estimator 구축
 
-**입력**: 고유사도 (I, A) 쌍
+**입력**: 임의의 (I, A) 쌍 (별도의 메타데이터 불필요)
 **출력**: Prior estimator, Type-II rules 검증
 
 ### Stage 1: Audio-only Control 학습
@@ -92,7 +95,11 @@ S_proxy 공간 학습 및 head 특화
 
 ### Stage 0 실행
 ```bash
-python scripts/train_stage0.py --config configs/stage0_config.yaml
+# Prior Estimator 검증
+python scripts/validate_stage0.py \
+    --config configs/stage0_config.yaml \
+    --num-samples 100 \
+    --visualize
 ```
 
 ### Stage 1 실행
@@ -106,11 +113,14 @@ python scripts/train_stage1.py --config configs/stage1_config.yaml --phase 1b
 
 ### Stage 2 실행
 ```bash
-# Phase 2-A: g only
+# Phase 2-A: g only (no generation)
 python scripts/train_stage2.py --config configs/stage2_config.yaml --phase 2a
 
-# Phase 2-B: End-to-end
+# Phase 2-B: End-to-end with generation
 python scripts/train_stage2.py --config configs/stage2_config.yaml --phase 2b
+
+# Phase 2-C: Subjectivity space learning (optional)
+python scripts/train_stage2.py --config configs/stage2_config.yaml --phase 2c
 ```
 
 ## 추론
@@ -128,10 +138,10 @@ python scripts/inference.py \
 
 각 stage별로 필요한 데이터:
 
-### Stage 0: High-Similarity Pairs
-- 형식: `{image_path, audio_path, similarity}`
-- 개수: ~10,000
-- 요구사항: 상위 5% 유사도
+### Stage 0: Prior Dataset
+- 형식: 단순 폴더 구조 (`images/`, `audios/`)
+- 개수: 제한 없음 (임의의 이미지와 오디오 파일)
+- 요구사항: 메타데이터 불필요, 지원 포맷 (.jpg, .png, .mp3, .wav, .flac 등)
 
 ### Stage 1-A: Synthetic Pairs
 - 형식: `{audio_init, audio_edit, head_target, effect_name}`
@@ -143,10 +153,41 @@ python scripts/inference.py \
 - 개수: ~1,000
 - 요구사항: 구조 유지, 스타일 변경
 
-### Stage 2: Cross-Modal Triplets
+### Stage 2-A, 2-B: Cross-Modal Triplets
 - 형식: `{image_init, image_edit, audio_init, edit_type}`
 - 개수: ~20,000
 - 주의: A_edit 없음 (zero-shot)
+
+### Stage 2-C: Subjectivity Dataset
+- 형식: `{audio_init, audio_edit, image_pair_candidates[]}`
+- 각 audio pair당 ~4개의 (image_init, image_edit) 후보
+- 각 후보는 validity_score 포함
+- 개수: ~3,000 audio pairs
+- 요구사항: 여러 유효한 시각적 해석 제공
+
+## System Specification v2 업데이트
+
+### 주요 변경사항
+1. **Hard Prior Rules**: 문헌 기반 12개 규칙 (r1-r12) 정의
+   - Core rules (r1-r10): 강한 증거
+   - Optional rules (r11-r12): 약한 증거
+   - 각 규칙에 참고문헌 명시
+
+2. **AudioLDM 통합**: HuggingFace 모델 사용
+   - 모델: `cvssp/audioldm-s-full-v2`
+   - LoRA fine-tuning 지원
+   - 맥북에서도 실행 가능
+
+3. **Stage 2-C 추가**: Subjectivity Space Learning
+   - δC predictor 구현
+   - 여러 유효한 해석 탐색
+   - UI 기반 인터랙티브 탐색 지원
+
+4. **Loss Functions 완전 구현**:
+   - Stage 1: MRSTFT, Structure Preservation, Pairwise Ranking
+   - Stage 2-A: Pseudo-target, Manifold, Identity, Monotonicity
+   - Stage 2-B: Conditional Preserve, Coherence, Consistency, Rank
+   - Stage 2-C: Direction, Bounded Variance, Prior Regularization
 
 ## 현재 상태 및 TODO
 
@@ -154,17 +195,18 @@ python scripts/inference.py \
 - [x] 프로젝트 구조 설계
 - [x] 기본 환경 설정 (requirements, configs)
 - [x] 데이터 처리 모듈 (transforms, datasets)
-- [x] Prior 구성 모듈 (Hard/Soft Prior)
-- [x] Visual Delta Encoder
-- [x] Delta Mapping Module
+- [x] Prior 구성 모듈 (Hard/Soft Prior with r1-r12 rules)
+- [x] Visual Delta Encoder (Low-level + High-level fusion)
+- [x] Delta Mapping Module (Sensitivity, Inertia, P_align)
 - [x] S Encoder
-- [x] Audio Generator wrapper (placeholder)
+- [x] Audio Generator (HuggingFace AudioLDM + FiLM)
+- [x] **δC Predictor (Stage 2-C)**
+- [x] **All Loss Functions**
 
 ### 🚧 진행 중
-- [ ] Loss functions 구현
-- [ ] Training loops (Stage 0, 1, 2)
+- [ ] Training loops 구현 (Stage 0, 1, 2)
 - [ ] Evaluation metrics
-- [ ] Inference pipeline
+- [ ] Data generation scripts
 
 ### 📝 다음 단계
 1. **Loss Functions 완성**

@@ -7,53 +7,112 @@ defaults:
 stage: 0
 stage_name: "prior_construction"
 
-# Data for Stage 0
+# Data
 data:
-  dataset_type: "high_similarity"
-  dataset_path: "${project.data_dir}/high_similarity_pairs"
-  num_samples: 10000
-  similarity_threshold: 0.95  # Top 5% similarity
-  batch_size: 32
+  dataset_path: "${project.data_dir}/prior_dataset"
 
-# Hard Prior (Type-II Rules), manually defined (need to add more)
+# Hard Prior (Type-II Rules) - Literature-based
+# Based on System Specification v2
 hard_prior:
-  num_rules: 10
+  num_rules: 12  # r1-r10 core, r11-r12 optional
   rules:
-    # Rule format: (f_v, f_a, rho_expected, h_target, w_r)
-    - name: "brightness_to_spectral_centroid"
+    # Core Rules (r1-r10) with strong evidence
+    - name: "r1_brightness_pitch"
       visual_feature: "brightness"
-      audio_feature: "spectral_centroid"
+      audio_feature: "pitch_height"
       correlation: 1.0  # positive
-      target_head: "timbre"
-      weight: 1.0
+      target_head: "harmony"
+      weight: 0.9
+      reference: "Marks (1987)"
 
-    - name: "motion_to_tempo"
-      visual_feature: "optical_flow_magnitude"
+    - name: "r2_lightness_loudness"
+      visual_feature: "lightness"
+      audio_feature: "loudness"
+      correlation: 1.0
+      target_head: "energy"
+      weight: 0.8
+      reference: "Marks (1974)"
+
+    - name: "r3_motion_tempo"
+      visual_feature: "motion_speed"
       audio_feature: "tempo"
       correlation: 1.0
       target_head: "rhythm"
-      weight: 1.0
+      weight: 0.9
+      reference: "Eitan & Granot (2006)"
 
-    - name: "blur_to_reverb"
-      visual_feature: "blur_amount"
-      audio_feature: "reverb_time"
-      correlation: 1.0
-      target_head: "space"
-      weight: 1.0
-
-    - name: "contrast_to_dynamic_range"
-      visual_feature: "contrast"
-      audio_feature: "dynamic_range"
-      correlation: 1.0
-      target_head: "energy"
-      weight: 1.0
-
-    - name: "saturation_to_harmonic_richness"
-      visual_feature: "saturation"
-      audio_feature: "harmonic_richness"
+    - name: "r4_vertical_pitch"
+      visual_feature: "vertical_position"
+      audio_feature: "pitch_height"
       correlation: 1.0
       target_head: "harmony"
-      weight: 1.0
+      weight: 0.8
+      reference: "Dolscheid et al (2014)"
+
+    - name: "r5_angular_attack"
+      visual_feature: "sharp_edges"
+      audio_feature: "attack_sharpness"
+      correlation: 1.0
+      target_head: "rhythm"
+      weight: 0.7
+      reference: "Köhler (1929)"
+
+    - name: "r6_smooth_sound"
+      visual_feature: "rounded_smooth"
+      audio_feature: "sound_smoothness"
+      correlation: 1.0
+      target_head: "texture"
+      weight: 0.7
+      reference: "Köhler (1929)"
+
+    - name: "r7_size_loudness"
+      visual_feature: "size_large"
+      audio_feature: "loudness"
+      correlation: 1.0
+      target_head: "energy"
+      weight: 0.7
+      reference: "Smith & Sera (1992)"
+
+    - name: "r8_saturation_intensity"
+      visual_feature: "saturation"
+      audio_feature: "musical_intensity"
+      correlation: 1.0
+      target_head: "energy"
+      weight: 0.7
+      reference: "Palmer et al (2013)"
+
+    - name: "r9_warm_colors_tempo"
+      visual_feature: "warm_colors"
+      audio_feature: "tempo"
+      correlation: 1.0
+      target_head: "rhythm"
+      weight: 0.6
+      reference: "Palmer et al (2013)"
+
+    - name: "r10_roughness_roughness"
+      visual_feature: "visual_roughness"
+      audio_feature: "sound_roughness"
+      correlation: 1.0
+      target_head: "texture"
+      weight: 0.6
+      reference: "Parise & Spence (2012)"
+
+    # Optional Rules (r11-r12) with weaker evidence
+    - name: "r11_blur_reverb"
+      visual_feature: "blur"
+      audio_feature: "reverb_spaciousness"
+      correlation: 1.0
+      target_head: "space"
+      weight: 0.5
+      reference: "Spence (2011) review inference"
+
+    - name: "r12_sharpness_dry"
+      visual_feature: "sharpness_focus"
+      audio_feature: "dry_close_sound"
+      correlation: -1.0  # negative
+      target_head: "space"
+      weight: 0.5
+      reference: "Spence (2011) review inference"
 
 # Soft Prior (ImageBind)
 soft_prior:
@@ -61,16 +120,16 @@ soft_prior:
   pretrained: true
   freeze: true
 
-  # Head queries initialization
+  # Head queries initialization (from Spec v2)
   head_queries:
-    init_method: "clip_text"  # or "random"
+    init_method: "clip_text"  # Initialize with CLIP text embeddings
     text_prompts:
-      rhythm: "rhythmic pattern and tempo"
-      harmony: "harmonic content and chords"
-      energy: "energy and dynamics"
-      timbre: "timbre and tone quality"
-      space: "reverb and spatial characteristics"
-      texture: "texture and noise qualities"
+      rhythm: "rhythmic pattern tempo beat"
+      harmony: "harmonic melody chord"
+      energy: "dynamic loud energy"
+      timbre: "timbral tone color bright"
+      space: "reverb space echo depth"
+      texture: "texture grain noise rough"
 
 # Validation
 validation:

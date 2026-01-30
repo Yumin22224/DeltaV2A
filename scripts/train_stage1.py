@@ -27,6 +27,11 @@ from src.data import (
     create_dataloader,
 )
 from src.models import SEncoder, AudioGenerator
+from src.losses import (
+    MultiResolutionSTFTLoss,
+    StructurePreservationLoss,
+    PairwiseRankingLoss,
+)
 
 
 def parse_args():
@@ -66,13 +71,21 @@ def train_epoch(
     optimizer_s,
     optimizer_g,
     device,
+    config,
     phase="1a",
+    loss_mrstft=None,
+    loss_struct=None,
+    loss_rank=None,
 ):
     """Single training epoch"""
     s_encoder.train()
     generator.train()
 
     total_loss = 0
+    total_mrstft = 0
+    total_struct = 0
+    total_rank = 0
+
     pbar = tqdm(dataloader, desc=f"Phase {phase}")
 
     for batch in pbar:
@@ -86,25 +99,67 @@ def train_epoch(
         # Forward: Generator (reconstruction)
         audio_recon = generator(audio_init, S_pred)
 
-        # TODO: Compute losses
-        # loss_recon = ...
-        # loss_struct = ...
-        # loss_rank = ...
+        # Compute losses based on Spec v2
+        loss = 0
+        loss_dict = {}
 
-        # Placeholder loss
-        loss = nn.functional.mse_loss(audio_recon, audio_edit)
+        # 1. Multi-Resolution STFT Loss (reconstruction quality)
+        if loss_mrstft is not None:
+            mrstft_loss = loss_mrstft(audio_edit, audio_recon)
+            loss_dict['mrstft'] = mrstft_loss.item()
+            loss += config.losses.mrstft.weight * mrstft_loss
+            total_mrstft += mrstft_loss.item()
+
+        # 2. Structure Preservation Loss (head consistency)
+        if loss_struct is not None:
+            struct_loss = loss_struct(
+                S_pred,
+                head_target=batch.get('head_target'),
+            )
+            loss_dict['struct'] = struct_loss.item()
+            loss += config.losses.structure.weight * struct_loss
+            total_struct += struct_loss.item()
+
+        # 3. Pairwise Ranking Loss (relative ordering)
+        if loss_rank is not None and phase == "1b":
+            # For remix pairs, we can use ranking loss
+            rank_loss = loss_rank(audio_init, audio_edit, audio_recon, S_pred)
+            loss_dict['rank'] = rank_loss.item()
+            loss += config.losses.rank.weight * rank_loss
+            total_rank += rank_loss.item()
 
         # Backward
         optimizer_s.zero_grad()
         optimizer_g.zero_grad()
         loss.backward()
+
+        # Gradient clipping
+        if config.training.gradient_clip > 0:
+            torch.nn.utils.clip_grad_norm_(
+                s_encoder.parameters(),
+                config.training.gradient_clip,
+            )
+            torch.nn.utils.clip_grad_norm_(
+                generator.parameters(),
+                config.training.gradient_clip,
+            )
+
         optimizer_s.step()
         optimizer_g.step()
 
         total_loss += loss.item()
-        pbar.set_postfix({"loss": loss.item()})
+        pbar.set_postfix(loss_dict)
 
-    return total_loss / len(dataloader)
+    metrics = {
+        'total': total_loss / len(dataloader),
+        'mrstft': total_mrstft / len(dataloader),
+        'struct': total_struct / len(dataloader),
+    }
+
+    if phase == "1b":
+        metrics['rank'] = total_rank / len(dataloader)
+
+    return metrics
 
 
 def main():
@@ -188,6 +243,21 @@ def main():
         weight_decay=config.optimizer.weight_decay,
     )
 
+    # Loss functions (based on Spec v2)
+    loss_mrstft = MultiResolutionSTFTLoss(
+        scales=config.losses.mrstft.scales,
+    ).to(device)
+
+    loss_struct = StructurePreservationLoss(
+        num_heads=config.model.num_heads,
+        struct_heads=config.losses.structure.struct_heads,
+        style_heads=config.losses.structure.style_heads,
+    ).to(device)
+
+    loss_rank = PairwiseRankingLoss(
+        margin=config.losses.rank.margin,
+    ).to(device) if args.phase == "1b" else None
+
     # Resume from checkpoint if provided
     start_epoch = 0
     if args.resume:
@@ -204,21 +274,31 @@ def main():
         print(f"\nEpoch {epoch+1}/{epochs}")
 
         # Train
-        train_loss = train_epoch(
+        metrics = train_epoch(
             s_encoder,
             generator,
             dataloader,
             optimizer_s,
             optimizer_g,
             device,
+            config,
             phase=args.phase,
+            loss_mrstft=loss_mrstft,
+            loss_struct=loss_struct,
+            loss_rank=loss_rank,
         )
 
-        print(f"Train loss: {train_loss:.4f}")
+        print(f"Train loss: {metrics['total']:.4f}")
+        print(f"  MRSTFT: {metrics['mrstft']:.4f}")
+        print(f"  Struct: {metrics['struct']:.4f}")
+        if 'rank' in metrics:
+            print(f"  Rank: {metrics['rank']:.4f}")
 
         # Log to wandb
         if config.logging.use_wandb:
-            wandb.log({"epoch": epoch, "train_loss": train_loss})
+            log_dict = {"epoch": epoch}
+            log_dict.update({f"train/{k}": v for k, v in metrics.items()})
+            wandb.log(log_dict)
 
         # Save checkpoint
         if (epoch + 1) % config.logging.save_every_n_epochs == 0:
@@ -246,8 +326,42 @@ def main():
     torch.save(generator.state_dict(), save_dir / "generator_final.pt")
     print(f"Saved final models to {save_dir}")
 
-    # TODO: Save S_proxy statistics
-    # Collect all S_pred outputs and compute statistics
+    # Compute and save S_proxy statistics (for Stage 2)
+    print("\nComputing S_proxy statistics...")
+    s_encoder.eval()
+
+    all_t_values = [[] for _ in range(config.model.num_heads)]
+    all_g_values = [[] for _ in range(config.model.num_heads)]
+
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc="Computing statistics"):
+            audio_init = batch["audio_init_mel"].to(device)
+            audio_edit = batch["audio_edit_mel"].to(device)
+
+            S_pred = s_encoder(audio_init, audio_edit)
+
+            # Collect statistics per head
+            for h in range(config.model.num_heads):
+                t_h, g_h = S_pred[h]
+                all_t_values[h].append(t_h.cpu())
+                all_g_values[h].append(g_h.cpu())
+
+    # Compute mean and std for each head
+    statistics = {}
+    for h in range(config.model.num_heads):
+        t_all = torch.cat(all_t_values[h], dim=0)  # (N, head_dim)
+        g_all = torch.cat(all_g_values[h], dim=0)  # (N, 1)
+
+        statistics[f'head_{h}'] = {
+            't_mean': t_all.mean(dim=0),  # (head_dim,)
+            't_std': t_all.std(dim=0),    # (head_dim,)
+            'g_mean': g_all.mean(),       # scalar
+            'g_std': g_all.std(),         # scalar
+        }
+
+    # Save statistics
+    torch.save(statistics, save_dir / "S_proxy_statistics.pt")
+    print(f"Saved S_proxy statistics to {save_dir / 'S_proxy_statistics.pt'}")
 
     if config.logging.use_wandb:
         wandb.finish()
