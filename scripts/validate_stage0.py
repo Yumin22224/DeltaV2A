@@ -168,9 +168,10 @@ def validate_dataset(args, config, prior_estimator):
 
             image = sample['image'].unsqueeze(0).to(device)
             audio_mel = sample['audio_mel'].unsqueeze(0).to(device)
+            waveform = sample['waveform'].unsqueeze(0).to(device) if 'waveform' in sample else None
 
-            # Estimate C_prior
-            C_prior = prior_estimator(image, audio_mel)
+            # Estimate C_prior (waveforms used by ImageBind audio encoder)
+            C_prior = prior_estimator(image, audio_mel, waveforms=waveform)
 
             # Validate
             validation = validate_c_prior(
@@ -258,8 +259,27 @@ def test_custom_pairs(args, config, prior_estimator):
     image_exts = ['.jpg', '.jpeg', '.png']
     audio_exts = ['.mp3', '.wav', '.flac']
 
-    images = sorted([f for f in test_dir.glob('*') if f.suffix.lower() in image_exts])
-    audios = sorted([f for f in test_dir.glob('*') if f.suffix.lower() in audio_exts])
+    # Support both flat structure and PriorDataset-style subdirectory structure
+    # Flat:  test_dir/*.jpg + test_dir/*.wav
+    # Subdir: test_dir/images/*.jpg + test_dir/audios/*.wav
+    images_subdir = test_dir / "images"
+    audios_subdir = test_dir / "audios"
+
+    if images_subdir.exists() and audios_subdir.exists():
+        search_dirs_img = [images_subdir]
+        search_dirs_aud = [audios_subdir]
+    else:
+        search_dirs_img = [test_dir]
+        search_dirs_aud = [test_dir]
+
+    images = sorted([
+        f for d in search_dirs_img
+        for f in d.glob('*') if f.suffix.lower() in image_exts
+    ])
+    audios = sorted([
+        f for d in search_dirs_aud
+        for f in d.glob('*') if f.suffix.lower() in audio_exts
+    ])
 
     if len(images) == 0 or len(audios) == 0:
         print(f"Error: No valid pairs found in {test_dir}")

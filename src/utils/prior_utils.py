@@ -41,7 +41,8 @@ def preprocess_test_audio(
     sample_rate: int = 16000,
     n_mels: int = 64,
     mel_time_steps: int = 800,
-) -> torch.Tensor:
+    return_waveform: bool = True,
+) -> Dict[str, torch.Tensor]:
     """
     Preprocess arbitrary audio for Prior testing
     Supports mp3, wav, flac, etc.
@@ -53,22 +54,29 @@ def preprocess_test_audio(
         sample_rate: Target sample rate
         n_mels: Number of mel bands
         mel_time_steps: Target time steps
+        return_waveform: Whether to also return raw waveform (for ImageBind)
 
     Returns:
-        audio_mel: (1, 1, T, F) mel spectrogram
+        Dictionary with:
+            - mel: (1, 1, T, F) mel spectrogram
+            - waveform: (1, T_samples) raw waveform (if return_waveform=True)
     """
     transform = AudioTransform(
         sample_rate=sample_rate,
         n_mels=n_mels,
         mel_time_steps=mel_time_steps,
     )
-    audio_result = transform(audio_path)
+    audio_result = transform(audio_path, return_waveform=return_waveform)
     mel_spec = audio_result['mel']  # (1, n_mels, T) from AudioTransform
 
     # Reshape to (1, 1, T, F) expected by Prior models
     mel_spec = mel_spec.transpose(1, 2).unsqueeze(0)  # (1, 1, T, n_mels)
 
-    return mel_spec
+    result = {'mel': mel_spec}
+    if return_waveform and 'waveform' in audio_result:
+        result['waveform'] = audio_result['waveform']  # (1, T_samples)
+
+    return result
 
 
 def validate_c_prior(
@@ -235,13 +243,20 @@ def visualize_hard_soft_comparison(
     for h, head_name in enumerate(head_names):
         ax = axes[h]
 
-        # Plot distributions
-        ax.hist(C_hard_np[:, h], bins=30, alpha=0.5, color='red',
-                label=f'Hard (α={alpha})', edgecolor='black')
-        ax.hist(C_soft_np[:, h], bins=30, alpha=0.5, color='blue',
-                label=f'Soft (1-α={1-alpha})', edgecolor='black')
-        ax.hist(C_prior_np[:, h], bins=30, alpha=0.7, color='green',
-                label='Combined', edgecolor='black')
+        # Plot distributions (use adaptive bins to handle low-variance data)
+        for data, color, label, a in [
+            (C_hard_np[:, h], 'red', f'Hard (α={alpha})', 0.5),
+            (C_soft_np[:, h], 'blue', f'Soft (1-α={1-alpha:.1f})', 0.5),
+            (C_prior_np[:, h], 'green', 'Combined', 0.7),
+        ]:
+            data_range = data.max() - data.min()
+            if data_range < 1e-6:
+                # Near-constant data: single bar
+                ax.axvline(data.mean(), color=color, alpha=a, linewidth=2, label=label)
+            else:
+                n_bins = min(30, max(5, int(len(data) ** 0.5)))
+                ax.hist(data, bins=n_bins, alpha=a, color=color,
+                        label=label, edgecolor='black')
 
         ax.set_title(f'{head_name.capitalize()} Head', fontsize=12, fontweight='bold')
         ax.set_xlabel('Coupling Weight')
@@ -263,6 +278,106 @@ def visualize_hard_soft_comparison(
         plt.show()
 
     plt.close()
+
+
+def export_rule_activations_json(
+    activation_detail: Dict,
+    image_path: str = "",
+    audio_path: str = "",
+    save_path: Optional[str] = None,
+) -> Dict:
+    """
+    Export rule activation diagnostics to JSON.
+
+    Shows which rules were activated for a given (image, audio) pair,
+    with visual feature values, audio descriptor values, and contributions.
+
+    Args:
+        activation_detail: Single-sample activation dict from HardPrior
+        image_path: Path to the image (for reference)
+        audio_path: Path to the audio (for reference)
+        save_path: Path to save JSON file (optional)
+
+    Returns:
+        json_data: Structured dict suitable for JSON serialization
+    """
+    import json
+
+    head_names = ['rhythm', 'harmony', 'energy', 'timbre', 'space', 'texture']
+
+    # Aggregate per-head contributions
+    head_summary = {h: {'total_weight': 0.0, 'activated_rules': [], 'inactive_rules': []}
+                    for h in head_names}
+
+    for rule_info in activation_detail.get('rules', []):
+        head = rule_info['target_head']
+        if head not in head_summary:
+            continue
+
+        entry = {
+            'rule': rule_info['name'],
+            'visual_feature': rule_info['visual_feature'],
+            'audio_feature': rule_info['audio_feature'],
+            'f_v': rule_info['f_v_value'],
+            'f_a': rule_info['f_a_value'],
+            'correlation': rule_info['correlation'],
+            'weight': rule_info['weight'],
+        }
+
+        if rule_info.get('activation_score') is not None:
+            entry['activation_score'] = rule_info['activation_score']
+
+        if rule_info['activated']:
+            head_summary[head]['activated_rules'].append(entry)
+            head_summary[head]['total_weight'] += rule_info.get('contribution', rule_info['weight'])
+        else:
+            head_summary[head]['inactive_rules'].append(entry)
+
+    json_data = {
+        'image': str(Path(image_path).name) if image_path else '',
+        'audio': str(Path(audio_path).name) if audio_path else '',
+        'tau': 0.5,
+        'summary': {
+            head: {
+                'total_activated_weight': round(info['total_weight'], 4),
+                'num_activated': len(info['activated_rules']),
+                'num_total': len(info['activated_rules']) + len(info['inactive_rules']),
+            }
+            for head, info in head_summary.items()
+        },
+        'rules': activation_detail.get('rules', []),
+        'head_details': head_summary,
+    }
+
+    if save_path:
+        with open(save_path, 'w', encoding='utf-8') as f:
+            json.dump(json_data, f, indent=2, ensure_ascii=False)
+        print(f"Saved rule activations to {save_path}")
+
+    return json_data
+
+
+def _print_activation_summary(activation_detail: Dict):
+    """Print a concise summary of rule activations."""
+    head_names = ['rhythm', 'harmony', 'energy', 'timbre', 'space', 'texture']
+    head_weights = {h: 0.0 for h in head_names}
+    activated_count = 0
+    total_count = 0
+
+    for rule_info in activation_detail.get('rules', []):
+        total_count += 1
+        if rule_info['activated']:
+            activated_count += 1
+            head = rule_info['target_head']
+            if head in head_weights:
+                head_weights[head] += rule_info.get('contribution', rule_info['weight'])
+
+    print(f"\nRule activations: {activated_count}/{total_count} rules activated")
+    print(f"  Per-head activated W_hard:")
+    for h in head_names:
+        w = head_weights[h]
+        indicator = " *" if w > 0 else ""
+        print(f"    {h:10s}: {w:.2f}{indicator}")
 
 
 def test_prior_estimator(
@@ -302,19 +417,34 @@ def test_prior_estimator(
     # Preprocess inputs
     print("Preprocessing inputs...")
     image = preprocess_test_image(image_path).to(device)
-    audio_mel = preprocess_test_audio(audio_path).to(device)
+    audio_result = preprocess_test_audio(audio_path, return_waveform=True)
+    audio_mel = audio_result['mel'].to(device)
+    waveform = audio_result.get('waveform', None)
+    if waveform is not None:
+        waveform = waveform.to(device)
 
     print(f"  Image shape: {image.shape}")
     print(f"  Audio shape: {audio_mel.shape}")
 
-    # Estimate C_prior
+    # Estimate C_prior (with rule activation details)
     print("\nEstimating C_prior...")
     prior_estimator.eval()
+    activation_details = None
     with torch.no_grad():
-        C_prior = prior_estimator(image, audio_mel)
+        result = prior_estimator(
+            image, audio_mel, waveforms=waveform, return_details=True
+        )
+        if isinstance(result, tuple):
+            C_prior, activation_details = result
+        else:
+            C_prior = result
 
     print(f"  C_prior shape: {C_prior.shape}")
     print(f"  C_prior range: [{C_prior.min():.4f}, {C_prior.max():.4f}]")
+
+    # Print rule activation summary
+    if activation_details:
+        _print_activation_summary(activation_details[0])
 
     # Validate
     print("\nValidating C_prior properties...")
@@ -340,6 +470,21 @@ def test_prior_estimator(
               f"std={weights.std():.3f}, "
               f"max={weights.max():.3f}")
 
+    # Compute C_soft and C_hard separately for comparison
+    C_soft = None
+    C_hard = None
+    if hasattr(prior_estimator, 'soft_prior') and hasattr(prior_estimator, 'hard_prior'):
+        with torch.no_grad():
+            C_soft = prior_estimator.soft_prior(image, audio_mel, waveforms=waveform)
+            # C_hard: saliency * activated W_hard, normalized
+            N_v = C_soft.shape[1]
+            saliency = prior_estimator.hard_prior.compute_saliency(image, N_v=N_v)
+            W_hard_activated, _ = prior_estimator.hard_prior.compute_activated_weights(
+                image, audio_mel, waveforms=waveform
+            )  # (B, 6)
+            C_hard_raw = saliency.unsqueeze(-1) * W_hard_activated.unsqueeze(1)
+            C_hard = C_hard_raw / (C_hard_raw.sum(dim=-1, keepdim=True) + 1e-8)
+
     # Visualize
     if visualize:
         print("\nGenerating visualizations...")
@@ -353,9 +498,33 @@ def test_prior_estimator(
             title=f"C_prior Distribution - {Path(image_path).stem}"
         )
 
+        # Hard vs Soft comparison
+        if C_soft is not None and C_hard is not None:
+            comp_path = save_dir / "hard_soft_comparison.png" if save_dir else None
+            visualize_hard_soft_comparison(
+                C_hard[0],
+                C_soft[0],
+                C_sample,
+                alpha=getattr(prior_estimator, 'alpha', 0.3),
+                save_path=str(comp_path) if comp_path else None,
+            )
+
+    # Save rule activation JSON
+    if activation_details and save_dir:
+        json_path = save_dir / "rule_activations.json"
+        export_rule_activations_json(
+            activation_details[0],
+            image_path=image_path,
+            audio_path=audio_path,
+            save_path=str(json_path),
+        )
+
     # Prepare results
     results = {
         'C_prior': C_prior,
+        'C_soft': C_soft,
+        'C_hard': C_hard,
+        'activation_details': activation_details,
         'validation': validation,
         'image_path': image_path,
         'audio_path': audio_path,

@@ -3,12 +3,17 @@ Centralized model loading utilities for pretrained models (ImageBind, CLIP)
 
 Avoids duplicated loading logic across prior.py, delta_c_predictor.py, etc.
 Handles SSL certificate issues on macOS and CWD-relative weight paths.
+
+Also provides ImageBind-compatible preprocessing for vision and audio:
+- Vision: extracts 256 spatial patch tokens from ViT trunk (before CLS head)
+- Audio: converts raw waveforms to Kaldi fbank spectrograms (128 mel bins, 204 frames)
 """
 
 import os
 import ssl
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from pathlib import Path
 from typing import Tuple, Optional
 
@@ -224,3 +229,216 @@ def clear_cache():
     global _imagebind_model, _clip_model
     _imagebind_model = None
     _clip_model = None
+
+
+# ---------------------------------------------------------------------------
+# ImageBind-compatible preprocessing utilities
+# ---------------------------------------------------------------------------
+
+# ImageBind normalization constants (different from ImageNet)
+_IMAGEBIND_VISION_MEAN = (0.48145466, 0.4578275, 0.40821073)
+_IMAGEBIND_VISION_STD = (0.26862954, 0.26130258, 0.27577711)
+
+# ImageBind audio constants (Kaldi fbank)
+_IMAGEBIND_AUDIO_MEAN = -4.268
+_IMAGEBIND_AUDIO_STD = 9.138
+_IMAGEBIND_AUDIO_NUM_MEL = 128
+_IMAGEBIND_AUDIO_TARGET_LEN = 204
+_IMAGEBIND_AUDIO_SAMPLE_RATE = 16000
+
+
+def imagebind_preprocess_vision(images: torch.Tensor) -> torch.Tensor:
+    """
+    Preprocess images for ImageBind's vision encoder.
+
+    ImageBind expects 224x224 images with its own normalization
+    (not ImageNet). This function handles resize + renormalize
+    from our pipeline's format.
+
+    Args:
+        images: (B, 3, H, W) images, assumed to be ImageNet-normalized
+
+    Returns:
+        (B, 3, 224, 224) images normalized for ImageBind
+    """
+    # Undo ImageNet normalization to get [0, 1] range
+    imagenet_mean = torch.tensor([0.485, 0.456, 0.406], device=images.device).view(1, 3, 1, 1)
+    imagenet_std = torch.tensor([0.229, 0.224, 0.225], device=images.device).view(1, 3, 1, 1)
+    images_01 = images * imagenet_std + imagenet_mean
+    images_01 = images_01.clamp(0, 1)
+
+    # Resize to 224x224 (ImageBind's expected resolution)
+    if images_01.shape[-2:] != (224, 224):
+        images_01 = F.interpolate(images_01, size=(224, 224), mode='bicubic', align_corners=False)
+        images_01 = images_01.clamp(0, 1)
+
+    # Apply ImageBind normalization
+    ib_mean = torch.tensor(_IMAGEBIND_VISION_MEAN, device=images.device).view(1, 3, 1, 1)
+    ib_std = torch.tensor(_IMAGEBIND_VISION_STD, device=images.device).view(1, 3, 1, 1)
+    images_ib = (images_01 - ib_mean) / ib_std
+
+    return images_ib
+
+
+def imagebind_extract_patch_tokens(
+    model: nn.Module,
+    images: torch.Tensor,
+    target_n_tokens: int = 256,
+) -> torch.Tensor:
+    """
+    Extract spatial patch tokens from ImageBind's vision transformer trunk,
+    bypassing the CLS-selection head.
+
+    ImageBind ViT-H with kernel_size=(2,14,14) on 224x224 produces:
+      16x16 = 256 patch tokens + 1 CLS token = 257 total
+    The standard forward() selects only CLS (index=0) via the head.
+    Here we run preprocessor + trunk only, then take tokens[1:] to get
+    the 256 spatial patch tokens.
+
+    Args:
+        model: ImageBind model instance
+        images: (B, 3, 224, 224) ImageBind-normalized images
+        target_n_tokens: desired number of output tokens (default 256)
+
+    Returns:
+        patch_tokens: (B, target_n_tokens, embed_dim) spatial patch tokens
+    """
+    from imagebind.models.imagebind_model import ModalityType
+
+    with torch.no_grad():
+        # Step 1: Run vision preprocessor
+        preprocessed = model.modality_preprocessors[ModalityType.VISION](
+            **{ModalityType.VISION: images}
+        )
+        trunk_inputs = preprocessed["trunk"]
+
+        # Step 2: Run vision trunk (transformer)
+        trunk_output = model.modality_trunks[ModalityType.VISION](**trunk_inputs)
+        # trunk_output: (B, 1 + num_patches, embed_dim)
+        # index 0 = CLS token, indices 1: = patch tokens
+
+        # Step 3: Extract patch tokens (skip CLS at index 0)
+        patch_tokens = trunk_output[:, 1:, :]  # (B, num_patches, embed_dim)
+
+        # Interpolate if patch count doesn't match target
+        num_patches = patch_tokens.shape[1]
+        if num_patches != target_n_tokens:
+            # (B, num_patches, D) -> (B, D, num_patches) -> interpolate -> (B, D, target) -> transpose
+            patch_tokens = F.interpolate(
+                patch_tokens.transpose(1, 2),
+                size=target_n_tokens,
+                mode='linear',
+                align_corners=False,
+            ).transpose(1, 2)
+
+    return patch_tokens
+
+
+def imagebind_extract_audio_embedding(
+    model: nn.Module,
+    audio_input: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Extract audio global embedding from ImageBind.
+
+    Args:
+        model: ImageBind model instance
+        audio_input: (B, num_clips, 1, 128, 204) ImageBind-formatted audio
+
+    Returns:
+        audio_embedding: (B, 1024) global audio embedding
+    """
+    from imagebind.models.imagebind_model import ModalityType
+
+    with torch.no_grad():
+        outputs = model({ModalityType.AUDIO: audio_input})
+        return outputs[ModalityType.AUDIO]  # (B, 1024)
+
+
+def waveform_to_imagebind_audio(
+    waveform: torch.Tensor,
+    sample_rate: int = 16000,
+    num_clips: int = 3,
+    clip_duration: float = 2.0,
+) -> torch.Tensor:
+    """
+    Convert raw waveform to ImageBind-compatible audio tensor.
+
+    Uses torchaudio Kaldi fbank (same as ImageBind's waveform2melspec)
+    to produce mel spectrograms with 128 bins and 204 time frames,
+    normalized with ImageBind's audio statistics.
+
+    Args:
+        waveform: (1, T) or (T,) mono waveform at sample_rate
+        sample_rate: waveform sample rate (will resample to 16kHz if different)
+        num_clips: number of temporal clips to extract
+        clip_duration: duration of each clip in seconds
+
+    Returns:
+        audio_tensor: (num_clips, 1, 128, 204) ready for ImageBind
+    """
+    import torchaudio
+
+    if waveform.dim() == 1:
+        waveform = waveform.unsqueeze(0)
+
+    # Resample to 16kHz if needed
+    if sample_rate != _IMAGEBIND_AUDIO_SAMPLE_RATE:
+        waveform = torchaudio.functional.resample(
+            waveform, sample_rate, _IMAGEBIND_AUDIO_SAMPLE_RATE
+        )
+
+    clip_samples = int(clip_duration * _IMAGEBIND_AUDIO_SAMPLE_RATE)
+    total_samples = waveform.shape[-1]
+
+    # Ensure waveform is long enough for at least one clip
+    if total_samples < clip_samples:
+        # Pad by repeating
+        repeats = (clip_samples + total_samples - 1) // total_samples
+        waveform = waveform.repeat(1, repeats)[:, :clip_samples]
+        total_samples = clip_samples
+
+    clips = []
+    for i in range(num_clips):
+        # Uniformly spaced clips
+        if num_clips > 1:
+            start = int(i * (total_samples - clip_samples) / (num_clips - 1))
+        else:
+            start = (total_samples - clip_samples) // 2
+        start = max(0, min(start, total_samples - clip_samples))
+
+        clip_waveform = waveform[:, start:start + clip_samples]
+
+        # Convert to Kaldi fbank mel spectrogram (same as ImageBind's waveform2melspec)
+        clip_waveform = clip_waveform - clip_waveform.mean()
+        fbank = torchaudio.compliance.kaldi.fbank(
+            clip_waveform,
+            htk_compat=True,
+            sample_frequency=_IMAGEBIND_AUDIO_SAMPLE_RATE,
+            use_energy=False,
+            window_type="hanning",
+            num_mel_bins=_IMAGEBIND_AUDIO_NUM_MEL,
+            dither=0.0,
+            frame_length=25,
+            frame_shift=10,
+        )  # (num_frames, 128)
+
+        # Transpose to (128, num_frames) and pad/crop to target_len=204
+        fbank = fbank.transpose(0, 1)  # (128, num_frames)
+        num_frames = fbank.shape[1]
+
+        if num_frames < _IMAGEBIND_AUDIO_TARGET_LEN:
+            padding = _IMAGEBIND_AUDIO_TARGET_LEN - num_frames
+            fbank = F.pad(fbank, (0, padding))
+        else:
+            fbank = fbank[:, :_IMAGEBIND_AUDIO_TARGET_LEN]
+
+        fbank = fbank.unsqueeze(0)  # (1, 128, 204)
+        clips.append(fbank)
+
+    audio_tensor = torch.stack(clips, dim=0)  # (num_clips, 1, 128, 204)
+
+    # Normalize with ImageBind's audio statistics
+    audio_tensor = (audio_tensor - _IMAGEBIND_AUDIO_MEAN) / (_IMAGEBIND_AUDIO_STD * 2)
+
+    return audio_tensor

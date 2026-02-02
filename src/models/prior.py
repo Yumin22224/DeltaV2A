@@ -157,15 +157,20 @@ class AudioDescriptorExtractor:
             'reverb_spaciousness', 'dry_close_sound'
         ]
 
-    def extract(self, audios: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def extract(
+        self,
+        audios: torch.Tensor,
+        waveforms: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
         """
         Extract all audio descriptors
 
         Args:
-            audios: (B, 1, T, F) mel spectrograms
+            audios: (B, 1, T, F) mel spectrograms (fallback if waveforms not provided)
+            waveforms: (B, T_samples) raw waveforms at 16kHz (preferred)
 
         Returns:
-            descriptors: Dict of descriptor_name -> (B,) scalar values
+            descriptors: Dict of descriptor_name -> (B,) scalar values in [0, 1]
         """
         try:
             import librosa
@@ -176,18 +181,20 @@ class AudioDescriptorExtractor:
         B = audios.shape[0]
         device = audios.device
 
-        # Convert mel to waveform (simplified - in practice use vocoder)
-        # For now, use inverse mel as approximation
         descriptors = {}
 
         for b in range(B):
-            mel = audios[b, 0].cpu().numpy()  # (T, F)
-
-            # Approximate waveform from mel (very rough)
-            # In practice, should use Griffin-Lim or neural vocoder
-            y = librosa.feature.inverse.mel_to_audio(
-                mel.T, sr=self.sr, n_fft=1024, hop_length=160
-            )
+            if waveforms is not None:
+                # Use raw waveform directly (much more accurate)
+                y = waveforms[b].cpu().numpy()
+                if y.ndim > 1:
+                    y = y.squeeze(0)
+            else:
+                # Fallback: reconstruct waveform from mel (rough approximation)
+                mel = audios[b, 0].cpu().numpy()  # (T, F)
+                y = librosa.feature.inverse.mel_to_audio(
+                    mel.T, sr=self.sr, n_fft=1024, hop_length=160
+                )
 
             # r1, r4: pitch_height (mean F0)
             if b == 0:
@@ -196,7 +203,7 @@ class AudioDescriptorExtractor:
                 f0, _, _ = librosa.pyin(y, fmin=librosa.note_to_hz('C2'),
                                        fmax=librosa.note_to_hz('C7'), sr=self.sr)
                 f0_mean = np.nanmean(f0) if len(f0) > 0 else 0.0
-                descriptors['pitch_height'].append(f0_mean / 1000.0)
+                descriptors['pitch_height'].append(np.clip(f0_mean / 1000.0, 0.0, 1.0))
             except:
                 descriptors['pitch_height'].append(0.0)
 
@@ -204,14 +211,14 @@ class AudioDescriptorExtractor:
             if b == 0:
                 descriptors['loudness'] = []
             rms = librosa.feature.rms(y=y)[0]
-            descriptors['loudness'].append(rms.mean())
+            descriptors['loudness'].append(np.clip(rms.mean(), 0.0, 1.0))
 
             # r3, r9: tempo
             if b == 0:
                 descriptors['tempo'] = []
             try:
                 tempo, _ = librosa.beat.beat_track(y=y, sr=self.sr)
-                descriptors['tempo'].append(tempo / 200.0)  # Normalize
+                descriptors['tempo'].append(np.clip(tempo / 200.0, 0.0, 1.0))
             except:
                 descriptors['tempo'].append(0.5)
 
@@ -219,37 +226,37 @@ class AudioDescriptorExtractor:
             if b == 0:
                 descriptors['attack_sharpness'] = []
             onset_env = librosa.onset.onset_strength(y=y, sr=self.sr)
-            descriptors['attack_sharpness'].append(onset_env.max() / 10.0)
+            descriptors['attack_sharpness'].append(np.clip(onset_env.max() / 10.0, 0.0, 1.0))
 
             # r6: sound_smoothness (inverse of spectral flux)
             if b == 0:
                 descriptors['sound_smoothness'] = []
             spec = np.abs(librosa.stft(y))
             flux = np.mean(np.diff(spec, axis=1)**2)
-            descriptors['sound_smoothness'].append(1.0 - min(flux / 100.0, 1.0))
+            descriptors['sound_smoothness'].append(np.clip(1.0 - min(flux / 100.0, 1.0), 0.0, 1.0))
 
             # r8: musical_intensity (spectral energy)
             if b == 0:
                 descriptors['musical_intensity'] = []
             spectral_energy = np.sum(spec**2) / spec.size
-            descriptors['musical_intensity'].append(min(spectral_energy / 1000.0, 1.0))
+            descriptors['musical_intensity'].append(np.clip(spectral_energy / 1000.0, 0.0, 1.0))
 
             # r10: sound_roughness (spectral irregularity)
             if b == 0:
                 descriptors['sound_roughness'] = []
             spec_contrast = librosa.feature.spectral_contrast(y=y, sr=self.sr)
-            descriptors['sound_roughness'].append(spec_contrast.std() / 10.0)
+            descriptors['sound_roughness'].append(np.clip(spec_contrast.std() / 10.0, 0.0, 1.0))
 
             # r11: reverb_spaciousness (spectral flatness - higher = more reverb)
             if b == 0:
                 descriptors['reverb_spaciousness'] = []
             flatness = librosa.feature.spectral_flatness(y=y)
-            descriptors['reverb_spaciousness'].append(flatness.mean())
+            descriptors['reverb_spaciousness'].append(np.clip(flatness.mean(), 0.0, 1.0))
 
             # r12: dry_close_sound (inverse of reverb)
             if b == 0:
                 descriptors['dry_close_sound'] = []
-            descriptors['dry_close_sound'].append(1.0 - descriptors['reverb_spaciousness'][-1])
+            descriptors['dry_close_sound'].append(np.clip(1.0 - descriptors['reverb_spaciousness'][-1], 0.0, 1.0))
 
         # Convert to tensors
         for key in descriptors:
@@ -454,8 +461,183 @@ class HardPrior:
         return saliency_tokens
 
     def get_weight_matrix(self) -> torch.Tensor:
-        """Get W_hard weight matrix"""
+        """Get static W_hard weight matrix (all rules, no activation check)"""
         return self.W_hard
+
+    @staticmethod
+    def compute_activation_score(
+        f_v: float,
+        f_a: float,
+        correlation: float,
+        tau: float = 0.5,
+        alpha: float = 3.0,
+    ) -> float:
+        """
+        Compute continuous activation score for a rule per Spec v2.4 Section 3.1.
+
+        Step 1: Feature Centering (High-side only)
+            f_v_tilde = max(0, f_v - tau)
+            f_a_tilde = max(0, f_a - tau)
+        Step 2: Saturation (tanh normalization)
+            f_v_hat = tanh(alpha * f_v_tilde)
+            f_a_hat = tanh(alpha * f_a_tilde)
+        Step 3: Correlation Score
+            s_r = f_v_hat * f_a_hat       if positive correlation
+            s_r = -f_v_hat * f_a_hat      if negative correlation
+
+        Args:
+            f_v: Visual feature value in [0, 1]
+            f_a: Audio descriptor value in [0, 1]
+            correlation: Expected correlation (+1 or -1)
+            tau: Neutral threshold (0.5)
+            alpha: Sensitivity parameter (3.0)
+
+        Returns:
+            s_r: Activation score (>= 0 after max(0, .))
+        """
+        # Step 1: High-side centering
+        f_v_tilde = max(0.0, f_v - tau)
+        f_a_tilde = max(0.0, f_a - tau)
+
+        # Step 2: Saturation
+        f_v_hat = np.tanh(alpha * f_v_tilde)
+        f_a_hat = np.tanh(alpha * f_a_tilde)
+
+        # Step 3: Correlation score
+        if correlation >= 0:  # positive correlation
+            s_r = f_v_hat * f_a_hat
+        else:  # negative correlation
+            s_r = -f_v_hat * f_a_hat
+
+        # Non-negative (negative scores are not meaningful)
+        return max(0.0, s_r)
+
+    def compute_activated_weights(
+        self,
+        images: torch.Tensor,
+        audios: torch.Tensor,
+        waveforms: Optional[torch.Tensor] = None,
+        tau: float = 0.5,
+        alpha: float = 3.0,
+        delta: float = 0.05,
+    ) -> Tuple[torch.Tensor, List[Dict]]:
+        """
+        Compute W_hard with continuous activation scores based on (I, A) pair.
+
+        Per Spec v2.4 Section 3.1:
+        W_hard[h] = Σ_{r: h_target(r)=h} w_r · max(0, s_r(I, A))
+
+        where s_r is a continuous activation score using high-side-only
+        centering and tanh saturation. A rule is considered activated
+        when s_r > delta (minimum activation threshold).
+
+        Args:
+            images: (B, 3, H, W) RGB images (ImageNet-normalized or [0,1])
+            audios: (B, 1, T, F) mel spectrograms
+            waveforms: (B, T_samples) raw waveforms (optional, preferred)
+            tau: Neutral threshold (0.5, features normalized to [0,1])
+            alpha: Sensitivity parameter for tanh saturation (3.0)
+            delta: Minimum activation threshold (0.05)
+
+        Returns:
+            W_hard_activated: (B, 6) per-sample activated weight vector
+            activation_details: List[Dict] per-sample rule activation info
+        """
+        B = images.shape[0]
+        device = images.device
+
+        # Undo ImageNet normalization if needed (check if values are outside [0,1])
+        images_01 = self._ensure_01_range(images)
+
+        # Extract features
+        visual_features = self.visual_extractor.extract(images_01)
+        audio_descriptors = self.audio_extractor.extract(audios, waveforms=waveforms)
+
+        # Rule-to-feature mapping
+        rule_feature_map = {
+            'r1_brightness_pitch': ('brightness', 'pitch_height'),
+            'r2_lightness_loudness': ('lightness', 'loudness'),
+            'r3_motion_tempo': ('motion_speed', 'tempo'),
+            'r4_vertical_pitch': ('vertical_position', 'pitch_height'),
+            'r5_angular_attack': ('sharp_edges', 'attack_sharpness'),
+            'r6_smooth_sound': ('rounded_smooth', 'sound_smoothness'),
+            'r7_size_loudness': ('size_large', 'loudness'),
+            'r8_saturation_intensity': ('saturation', 'musical_intensity'),
+            'r9_warm_colors_tempo': ('warm_colors', 'tempo'),
+            'r10_roughness_roughness': ('visual_roughness', 'sound_roughness'),
+            'r11_blur_reverb': ('blur', 'reverb_spaciousness'),
+            'r12_sharpness_dry': ('sharpness_focus', 'dry_close_sound'),
+        }
+
+        W_hard_batch = torch.zeros(B, self.num_heads, device=device)
+        activation_details = []
+
+        for b in range(B):
+            sample_details = {'rules': []}
+
+            for rule in self.rules:
+                rule_name = rule['name']
+                target_head = rule['target_head']
+                weight = rule['weight']
+                correlation = rule.get('correlation', 1.0)
+
+                h_idx = self.head_names.index(target_head) if target_head in self.head_names else -1
+                if h_idx < 0:
+                    continue
+
+                # Get feature names for this rule
+                if rule_name in rule_feature_map:
+                    f_v_name, f_a_name = rule_feature_map[rule_name]
+                else:
+                    # Try to match by visual_feature/audio_feature from config
+                    f_v_name = rule.get('visual_feature', None)
+                    f_a_name = rule.get('audio_feature', None)
+
+                if f_v_name is None or f_a_name is None:
+                    continue
+
+                # Get feature values
+                f_v = visual_features.get(f_v_name, torch.zeros(B, device=device))[b].item()
+                f_a = audio_descriptors.get(f_a_name, torch.zeros(B, device=device))[b].item()
+
+                # Continuous activation score per Spec v2.4
+                s_r = self.compute_activation_score(
+                    f_v, f_a, correlation, tau=tau, alpha=alpha,
+                )
+                activated = bool(s_r > delta)
+
+                # Continuous weighting: w_r * s_r (not binary w_r)
+                contribution = weight * s_r if activated else 0.0
+                if activated:
+                    W_hard_batch[b, h_idx] += contribution
+
+                sample_details['rules'].append({
+                    'name': rule_name,
+                    'target_head': target_head,
+                    'visual_feature': f_v_name,
+                    'audio_feature': f_a_name,
+                    'f_v_value': round(f_v, 4),
+                    'f_a_value': round(f_a, 4),
+                    'correlation': correlation,
+                    'weight': weight,
+                    'activation_score': round(s_r, 4),
+                    'activated': activated,
+                    'contribution': round(contribution, 4),
+                })
+
+            activation_details.append(sample_details)
+
+        return W_hard_batch, activation_details
+
+    def _ensure_01_range(self, images: torch.Tensor) -> torch.Tensor:
+        """Undo ImageNet normalization to get [0,1] range if needed."""
+        # Check if values are outside [0,1] (ImageNet-normalized)
+        if images.min() < -0.5:
+            imagenet_mean = torch.tensor([0.485, 0.456, 0.406], device=images.device).view(1, 3, 1, 1)
+            imagenet_std = torch.tensor([0.229, 0.224, 0.225], device=images.device).view(1, 3, 1, 1)
+            images = images * imagenet_std + imagenet_mean
+            images = images.clamp(0, 1)
+        return images
 
 
 class SoftPrior(nn.Module):
@@ -510,6 +692,19 @@ class SoftPrior(nn.Module):
             requires_grad=False,
         )
 
+        # Projection layers for ImageBind embeddings (1280 -> head_dim, 1024 -> head_dim)
+        # Initialized with fixed seed for reproducibility across runs
+        if getattr(self, '_is_imagebind', False):
+            rng_state = torch.random.get_rng_state()
+            torch.manual_seed(42)
+            self._vision_proj = nn.Linear(1280, head_dim, bias=False)
+            nn.init.xavier_uniform_(self._vision_proj.weight)
+            self._vision_proj.requires_grad_(False)
+            self._audio_proj_ib = nn.Linear(1024, head_dim, bias=False)
+            nn.init.xavier_uniform_(self._audio_proj_ib.weight)
+            self._audio_proj_ib.requires_grad_(False)
+            torch.random.set_rng_state(rng_state)
+
     def _load_imagebind(self, model_name: str):
         """Load ImageBind or fallback to CLIP using centralized loader"""
         from src.utils.model_loaders import load_imagebind_or_clip
@@ -558,16 +753,21 @@ class SoftPrior(nn.Module):
         self,
         images: torch.Tensor,
         audios: torch.Tensor,
+        waveforms: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Extract v_tokens and a_tokens
 
-        Uses ImageBind for both modalities when available.
+        Uses ImageBind for both modalities when available:
+        - Vision: extracts 256 spatial patch tokens from ViT trunk
+        - Audio: converts waveforms to Kaldi fbank, gets global embedding
+
         Falls back to CLIP for vision only (audio uses mel-based projection).
 
         Args:
-            images: (B, 3, H, W)
-            audios: (B, 1, T, F) mel spectrograms
+            images: (B, 3, H, W) images (ImageNet-normalized)
+            audios: (B, 1, T, F) mel spectrograms (used for CLIP fallback)
+            waveforms: (B, T_samples) raw waveforms at 16kHz (used for ImageBind)
 
         Returns:
             v_tokens: (B, N_v, D)
@@ -581,9 +781,9 @@ class SoftPrior(nn.Module):
                 a_tokens = torch.randn(B, self.N_a, self.head_dim, device=audios.device)
 
             elif getattr(self, '_is_imagebind', False):
-                # ImageBind: proper multimodal token extraction
+                # ImageBind: spatial patch tokens + waveform-based audio
                 v_tokens = self._extract_imagebind_vision(images)
-                a_tokens = self._extract_imagebind_audio(audios)
+                a_tokens = self._extract_imagebind_audio(waveforms, audios)
             else:
                 # CLIP fallback: vision tokens from CLIP, audio from mel projection
                 v_tokens = self._extract_clip_vision(images)
@@ -592,35 +792,30 @@ class SoftPrior(nn.Module):
         return v_tokens, a_tokens
 
     def _extract_imagebind_vision(self, images: torch.Tensor) -> torch.Tensor:
-        """Extract vision tokens using ImageBind"""
-        from imagebind.data import load_and_transform_vision_data
-        from imagebind import ModalityType
+        """
+        Extract 256 spatial patch tokens from ImageBind's ViT trunk.
+
+        Bypasses the CLS-selection head to get actual spatial tokens.
+        ImageBind ViT-H with (2,14,14) patches on 224x224 = 256 spatial tokens.
+        """
+        from src.utils.model_loaders import (
+            imagebind_preprocess_vision,
+            imagebind_extract_patch_tokens,
+        )
 
         B = images.shape[0]
 
         try:
-            # ImageBind forward with vision modality
-            inputs = {ModalityType.VISION: images}
-            embeddings = self.vision_model(inputs)
-            v_features = embeddings[ModalityType.VISION]  # (B, D)
+            # Preprocess: undo ImageNet norm, resize to 224, apply ImageBind norm
+            images_ib = imagebind_preprocess_vision(images)
 
-            # Expand to N_v tokens
-            if v_features.dim() == 2:
-                v_tokens = v_features.unsqueeze(1).expand(-1, self.N_v, -1)
-            else:
-                v_tokens = v_features
+            # Extract 256 spatial patch tokens from trunk (skip CLS head)
+            patch_tokens = imagebind_extract_patch_tokens(
+                self.vision_model, images_ib, target_n_tokens=self.N_v
+            )  # (B, N_v, embed_dim)  embed_dim=1280 for ViT-H
 
-            # Project to head_dim if needed
-            if v_tokens.shape[-1] != self.head_dim:
-                v_tokens = F.adaptive_avg_pool1d(
-                    v_tokens.transpose(1, 2), self.head_dim
-                ).transpose(1, 2)
-
-            # Pad/truncate to N_v tokens
-            if v_tokens.shape[1] < self.N_v:
-                v_tokens = v_tokens.expand(-1, self.N_v, -1)
-            elif v_tokens.shape[1] > self.N_v:
-                v_tokens = v_tokens[:, :self.N_v, :]
+            # Project 1280-dim patch tokens to head_dim
+            v_tokens = self._vision_proj(patch_tokens.to(self._vision_proj.weight.device))
 
         except Exception as e:
             print(f"ImageBind vision extraction failed: {e}")
@@ -628,42 +823,60 @@ class SoftPrior(nn.Module):
 
         return v_tokens
 
-    def _extract_imagebind_audio(self, audios: torch.Tensor) -> torch.Tensor:
-        """Extract audio tokens using ImageBind"""
-        from imagebind import ModalityType
+    def _extract_imagebind_audio(
+        self,
+        waveforms: Optional[torch.Tensor],
+        audios_mel: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Extract audio tokens using ImageBind.
 
-        B = audios.shape[0]
+        When waveforms are available: converts to Kaldi fbank (128 mel, 204 frames)
+        and runs ImageBind's audio encoder for a (B, 1024) global embedding,
+        then expands to N_a tokens.
+
+        When only mel spectrograms are available: falls back to mel-based projection.
+
+        Args:
+            waveforms: (B, T_samples) raw waveforms at 16kHz, or None
+            audios_mel: (B, 1, T, F) mel spectrograms (fallback)
+        """
+        from src.utils.model_loaders import (
+            waveform_to_imagebind_audio,
+            imagebind_extract_audio_embedding,
+        )
+
+        B = audios_mel.shape[0]
+        device = audios_mel.device
+
+        if waveforms is None:
+            # No waveforms available, use mel-based fallback
+            return self._extract_audio_from_mel(audios_mel)
 
         try:
-            # ImageBind expects audio as (B, 1, mel_bins, time_steps)
-            # Our input is (B, 1, T, F) - transpose to (B, 1, F, T)
-            audio_input = audios.transpose(2, 3)
+            # Convert each waveform to ImageBind format and batch
+            audio_inputs = []
+            for b in range(B):
+                wf = waveforms[b]  # (T_samples,) or (1, T_samples)
+                ib_audio = waveform_to_imagebind_audio(wf)  # (num_clips, 1, 128, 204)
+                audio_inputs.append(ib_audio)
 
-            inputs = {ModalityType.AUDIO: audio_input}
-            embeddings = self.vision_model(inputs)
-            a_features = embeddings[ModalityType.AUDIO]  # (B, D)
+            audio_batch = torch.stack(audio_inputs, dim=0).to(device)
+            # (B, num_clips, 1, 128, 204)
 
-            # Expand to N_a tokens
-            if a_features.dim() == 2:
-                a_tokens = a_features.unsqueeze(1).expand(-1, self.N_a, -1)
-            else:
-                a_tokens = a_features
+            # Get global audio embedding
+            a_features = imagebind_extract_audio_embedding(
+                self.vision_model, audio_batch
+            )  # (B, 1024)
 
-            # Project to head_dim if needed
-            if a_tokens.shape[-1] != self.head_dim:
-                a_tokens = F.adaptive_avg_pool1d(
-                    a_tokens.transpose(1, 2), self.head_dim
-                ).transpose(1, 2)
-
-            # Pad/truncate to N_a tokens
-            if a_tokens.shape[1] < self.N_a:
-                a_tokens = a_tokens.expand(-1, self.N_a, -1)
-            elif a_tokens.shape[1] > self.N_a:
-                a_tokens = a_tokens[:, :self.N_a, :]
+            # Project 1024-dim embedding to head_dim, then expand to N_a tokens
+            a_projected = self._audio_proj_ib(a_features)  # (B, head_dim)
+            a_tokens = a_projected.unsqueeze(1).expand(-1, self.N_a, -1)
+            # (B, N_a, head_dim)
 
         except Exception as e:
             print(f"ImageBind audio extraction failed: {e}")
-            a_tokens = torch.randn(B, self.N_a, self.head_dim, device=audios.device)
+            a_tokens = self._extract_audio_from_mel(audios_mel)
 
         return a_tokens
 
@@ -766,9 +979,10 @@ class SoftPrior(nn.Module):
         self,
         images: torch.Tensor,
         audios: torch.Tensor,
+        waveforms: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Compute C_soft"""
-        v_tokens, a_tokens = self.extract_tokens(images, audios)
+        v_tokens, a_tokens = self.extract_tokens(images, audios, waveforms=waveforms)
         C_soft = self.compute_coupling(v_tokens, a_tokens)
         return C_soft
 
@@ -811,31 +1025,41 @@ class PriorEstimator(nn.Module):
         images: torch.Tensor,
         audios: torch.Tensor,
         delta_C: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+        waveforms: Optional[torch.Tensor] = None,
+        return_details: bool = False,
+    ):
         """
         Estimate C_anchor = C_prior + δC
+
+        Per Spec v2.3: W_hard is computed per-sample based on rule activation
+        using both visual features and audio descriptors.
 
         Args:
             images: (B, 3, H, W)
             audios: (B, 1, T, F)
             delta_C: (B, N_v, 6) optional perturbation
+            waveforms: (B, T_samples) raw waveforms at 16kHz (optional)
+            return_details: If True, return (C_anchor, activation_details)
 
         Returns:
             C_anchor: (B, N_v, 6)
+            activation_details: (optional) List[Dict] per-sample rule activation info
         """
         # Compute C_soft
-        C_soft = self.soft_prior(images, audios)
+        C_soft = self.soft_prior(images, audios, waveforms=waveforms)
         B, N_v, num_heads = C_soft.shape
 
         # Compute saliency
         saliency = self.hard_prior.compute_saliency(images, N_v=N_v)  # (B, N_v)
 
-        # Get W_hard
-        W_hard = self.hard_prior.get_weight_matrix().to(images.device)  # (6,)
+        # Compute activated W_hard per-sample (Spec v2.3 Section 3.1)
+        W_hard_activated, activation_details = self.hard_prior.compute_activated_weights(
+            images, audios, waveforms=waveforms
+        )  # (B, 6), List[Dict]
 
         # Combine: C_prior[i, :] = (1-α)·C_soft[i, :] + α·s_i·W_hard^T
         saliency_expanded = saliency.unsqueeze(-1)  # (B, N_v, 1)
-        W_hard_expanded = W_hard.unsqueeze(0).unsqueeze(0)  # (1, 1, 6)
+        W_hard_expanded = W_hard_activated.unsqueeze(1)  # (B, 1, 6)
 
         C_hard = saliency_expanded * W_hard_expanded  # (B, N_v, 6)
         C_hard = C_hard / (C_hard.sum(dim=-1, keepdim=True) + 1e-8)
@@ -851,6 +1075,8 @@ class PriorEstimator(nn.Module):
         # Apply constraints
         C_anchor = self._apply_constraints(C_anchor)
 
+        if return_details:
+            return C_anchor, activation_details
         return C_anchor
 
     def _apply_constraints(self, C: torch.Tensor) -> torch.Tensor:
@@ -875,6 +1101,9 @@ class PriorEstimator(nn.Module):
         self,
         images: torch.Tensor,
         audios: torch.Tensor,
+        waveforms: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Estimate C_prior (δC=0) for Stage 2-A/B"""
-        return self.forward(images, audios, delta_C=None)
+        result = self.forward(images, audios, delta_C=None, waveforms=waveforms)
+        assert isinstance(result, torch.Tensor)
+        return result

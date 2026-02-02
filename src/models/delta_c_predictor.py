@@ -83,6 +83,15 @@ class DeltaCPredictor(nn.Module):
         # Register epsilon as buffer
         self.register_buffer('epsilon_prior', torch.tensor(epsilon_prior))
 
+        # Projection layer for ImageBind patch tokens (1280 -> visual_dim)
+        # Fixed seed for reproducibility
+        rng_state = torch.random.get_rng_state()
+        torch.manual_seed(42)
+        self._dc_vision_proj = nn.Linear(1280, visual_dim, bias=False)
+        nn.init.xavier_uniform_(self._dc_vision_proj.weight)
+        self._dc_vision_proj.requires_grad_(False)
+        torch.random.set_rng_state(rng_state)
+
     def _load_imagebind(self):
         """
         Load ImageBind model (same as Soft Prior)
@@ -97,7 +106,10 @@ class DeltaCPredictor(nn.Module):
 
     def encode_visual_tokens(self, images: torch.Tensor) -> torch.Tensor:
         """
-        Extract visual tokens using ImageBind or CLIP fallback
+        Extract visual tokens using ImageBind or CLIP fallback.
+
+        When using ImageBind, extracts 256 spatial patch tokens from the ViT trunk
+        (bypassing the CLS-selection head) for spatially-aware token representations.
 
         Args:
             images: (B, 3, H, W)
@@ -113,19 +125,22 @@ class DeltaCPredictor(nn.Module):
         with torch.no_grad():
             if getattr(self, '_is_imagebind', False):
                 try:
-                    from imagebind import ModalityType
-                    inputs = {ModalityType.VISION: images}
-                    embeddings = self.imagebind(inputs)
-                    v_features = embeddings[ModalityType.VISION]  # (B, D)
+                    from src.utils.model_loaders import (
+                        imagebind_preprocess_vision,
+                        imagebind_extract_patch_tokens,
+                    )
 
-                    if v_features.dim() == 2:
-                        v_tokens = v_features.unsqueeze(1).expand(-1, self.N_v, -1)
-                    else:
-                        v_tokens = v_features
-                        if v_tokens.shape[1] != self.N_v:
-                            v_tokens = F.interpolate(
-                                v_tokens.transpose(1, 2), size=self.N_v, mode='linear'
-                            ).transpose(1, 2)
+                    # Preprocess: undo ImageNet norm, resize to 224, apply ImageBind norm
+                    images_ib = imagebind_preprocess_vision(images)
+
+                    # Extract 256 spatial patch tokens from trunk
+                    v_tokens = imagebind_extract_patch_tokens(
+                        self.imagebind, images_ib, target_n_tokens=self.N_v
+                    )  # (B, N_v, embed_dim=1280)
+
+                    # Project 1280-dim patch tokens to visual_dim
+                    v_tokens = self._dc_vision_proj(v_tokens)
+
                 except Exception as e:
                     print(f"ImageBind vision failed: {e}")
                     v_tokens = torch.randn(B, self.N_v, self.visual_dim, device=images.device)
@@ -139,12 +154,20 @@ class DeltaCPredictor(nn.Module):
 
         return v_tokens
 
-    def encode_audio_global(self, audios: torch.Tensor) -> torch.Tensor:
+    def encode_audio_global(
+        self,
+        audios: torch.Tensor,
+        waveforms: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
-        Extract audio global embedding using ImageBind or mel-based fallback
+        Extract audio global embedding using ImageBind or mel-based fallback.
+
+        When waveforms are provided and ImageBind is available, converts to
+        Kaldi fbank format (128 mel bins, 204 frames) for proper audio encoding.
 
         Args:
-            audios: (B, 1, T, F) mel spectrograms
+            audios: (B, 1, T, F) mel spectrograms (fallback)
+            waveforms: (B, T_samples) raw waveforms at 16kHz (optional, for ImageBind)
 
         Returns:
             a_global: (B, D) global audio embedding
@@ -155,19 +178,31 @@ class DeltaCPredictor(nn.Module):
             return torch.randn(B, self.audio_dim, device=audios.device)
 
         with torch.no_grad():
-            if getattr(self, '_is_imagebind', False):
+            if getattr(self, '_is_imagebind', False) and waveforms is not None:
                 try:
-                    from imagebind import ModalityType
-                    # ImageBind expects (B, 1, mel_bins, time_steps)
-                    audio_input = audios.transpose(2, 3)
-                    inputs = {ModalityType.AUDIO: audio_input}
-                    embeddings = self.imagebind(inputs)
-                    a_global = embeddings[ModalityType.AUDIO]  # (B, D)
+                    from src.utils.model_loaders import (
+                        waveform_to_imagebind_audio,
+                        imagebind_extract_audio_embedding,
+                    )
+
+                    # Convert waveforms to ImageBind format
+                    audio_inputs = []
+                    for b in range(B):
+                        ib_audio = waveform_to_imagebind_audio(waveforms[b])
+                        audio_inputs.append(ib_audio)
+
+                    audio_batch = torch.stack(audio_inputs, dim=0).to(audios.device)
+                    # (B, num_clips, 1, 128, 204)
+
+                    a_global = imagebind_extract_audio_embedding(
+                        self.imagebind, audio_batch
+                    )  # (B, 1024)
+
                 except Exception as e:
                     print(f"ImageBind audio failed: {e}")
                     a_global = torch.randn(B, self.audio_dim, device=audios.device)
             else:
-                # CLIP has no audio encoder - use mel global pooling as proxy
+                # CLIP/mel fallback - use mel global pooling as proxy
                 mel = audios.squeeze(1)  # (B, T, F)
                 a_global = mel.mean(dim=1)  # (B, F)
                 # Project to audio_dim if needed
@@ -185,6 +220,7 @@ class DeltaCPredictor(nn.Module):
         I_init: torch.Tensor,
         A_init: torch.Tensor,
         I_edit: torch.Tensor,
+        waveforms: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Predict δC for given triplet (token-wise)
@@ -193,6 +229,7 @@ class DeltaCPredictor(nn.Module):
             I_init: (B, 3, H, W) initial image
             A_init: (B, 1, T, F) initial audio mel spectrogram
             I_edit: (B, 3, H, W) edited image
+            waveforms: (B, T_samples) raw waveforms at 16kHz (optional, for ImageBind audio)
 
         Returns:
             δC: (B, N_v, num_heads) predicted coupling deviation
@@ -203,7 +240,7 @@ class DeltaCPredictor(nn.Module):
         # Extract ImageBind tokens
         v_init_tokens = self.encode_visual_tokens(I_init)  # (B, N_v, D)
         v_edit_tokens = self.encode_visual_tokens(I_edit)  # (B, N_v, D)
-        a_global = self.encode_audio_global(A_init)        # (B, D)
+        a_global = self.encode_audio_global(A_init, waveforms=waveforms)  # (B, D)
 
         # Compute per-token visual delta
         Δv_tokens = v_edit_tokens - v_init_tokens  # (B, N_v, D)
@@ -278,6 +315,7 @@ class DeltaCPredictor(nn.Module):
         I_edit: torch.Tensor,
         n_samples: int = 5,
         noise_std: float = 0.1,
+        waveforms: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Sample multiple δC variations for exploration
@@ -288,12 +326,13 @@ class DeltaCPredictor(nn.Module):
             I_edit: (B, 3, H, W)
             n_samples: Number of samples
             noise_std: Gaussian noise std for sampling
+            waveforms: (B, T_samples) raw waveforms (optional, for ImageBind)
 
         Returns:
             δC_samples: (n_samples, B, N_v, num_heads)
         """
         # Base prediction
-        δC_base = self.forward(I_init, A_init, I_edit)  # (B, N_v, num_heads)
+        δC_base = self.forward(I_init, A_init, I_edit, waveforms=waveforms)  # (B, N_v, num_heads)
 
         # Sample variations
         δC_samples = []
