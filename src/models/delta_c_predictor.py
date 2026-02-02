@@ -90,49 +90,14 @@ class DeltaCPredictor(nn.Module):
         Returns:
             ImageBind model or fallback
         """
-        try:
-            # Try ImageBind
-            import sys
-            sys.path.append('/path/to/ImageBind')  # Adjust path
-            from imagebind import imagebind_model
+        from src.utils.model_loaders import load_imagebind_or_clip
 
-            model = imagebind_model.imagebind_huge(pretrained=True)
-
-            # Freeze
-            for param in model.parameters():
-                param.requires_grad = False
-
-            model.eval()
-
-            print("Loaded ImageBind for δC Predictor")
-            return model
-
-        except ImportError:
-            print("Warning: ImageBind not available, trying CLIP fallback...")
-
-            try:
-                import open_clip
-
-                vision_model, _, _ = open_clip.create_model_and_transforms(
-                    'ViT-L-14', pretrained='openai'
-                )
-
-                # Freeze
-                for param in vision_model.parameters():
-                    param.requires_grad = False
-
-                vision_model.eval()
-
-                print("Using CLIP fallback for δC Predictor")
-                return vision_model
-
-            except ImportError:
-                print("Warning: Neither ImageBind nor CLIP available")
-                return nn.Identity()
+        model, self._is_imagebind = load_imagebind_or_clip(freeze=True)
+        return model
 
     def encode_visual_tokens(self, images: torch.Tensor) -> torch.Tensor:
         """
-        Extract ImageBind visual tokens
+        Extract visual tokens using ImageBind or CLIP fallback
 
         Args:
             images: (B, 3, H, W)
@@ -140,29 +105,43 @@ class DeltaCPredictor(nn.Module):
         Returns:
             v_tokens: (B, N_v, D) visual tokens
         """
+        B = images.shape[0]
+
         if isinstance(self.imagebind, nn.Identity):
-            B = images.shape[0]
             return torch.randn(B, self.N_v, self.visual_dim, device=images.device)
 
         with torch.no_grad():
-            # ImageBind vision encoding
-            try:
-                # ImageBind format
-                v_tokens = self.imagebind.vision(images)  # (B, N_v, D)
-            except AttributeError:
-                # CLIP fallback - extract intermediate tokens
-                if hasattr(self.imagebind, 'visual'):
-                    v_tokens = self.imagebind.visual.forward_features(images)
-                else:
-                    # Last resort
-                    B = images.shape[0]
+            if getattr(self, '_is_imagebind', False):
+                try:
+                    from imagebind import ModalityType
+                    inputs = {ModalityType.VISION: images}
+                    embeddings = self.imagebind(inputs)
+                    v_features = embeddings[ModalityType.VISION]  # (B, D)
+
+                    if v_features.dim() == 2:
+                        v_tokens = v_features.unsqueeze(1).expand(-1, self.N_v, -1)
+                    else:
+                        v_tokens = v_features
+                        if v_tokens.shape[1] != self.N_v:
+                            v_tokens = F.interpolate(
+                                v_tokens.transpose(1, 2), size=self.N_v, mode='linear'
+                            ).transpose(1, 2)
+                except Exception as e:
+                    print(f"ImageBind vision failed: {e}")
+                    v_tokens = torch.randn(B, self.N_v, self.visual_dim, device=images.device)
+            else:
+                # CLIP fallback
+                try:
+                    v_features = self.imagebind.encode_image(images)  # (B, D)
+                    v_tokens = v_features.unsqueeze(1).expand(-1, self.N_v, -1)
+                except Exception:
                     v_tokens = torch.randn(B, self.N_v, self.visual_dim, device=images.device)
 
         return v_tokens
 
     def encode_audio_global(self, audios: torch.Tensor) -> torch.Tensor:
         """
-        Extract ImageBind audio global embedding
+        Extract audio global embedding using ImageBind or mel-based fallback
 
         Args:
             audios: (B, 1, T, F) mel spectrograms
@@ -170,20 +149,34 @@ class DeltaCPredictor(nn.Module):
         Returns:
             a_global: (B, D) global audio embedding
         """
+        B = audios.shape[0]
+
         if isinstance(self.imagebind, nn.Identity):
-            B = audios.shape[0]
             return torch.randn(B, self.audio_dim, device=audios.device)
 
         with torch.no_grad():
-            # ImageBind audio encoding
-            try:
-                # Convert mel to format expected by ImageBind
-                # ImageBind expects waveform, but we can use mel as proxy
-                a_global = self.imagebind.audio(audios)  # (B, D)
-            except:
-                # Fallback
-                B = audios.shape[0]
-                a_global = torch.randn(B, self.audio_dim, device=audios.device)
+            if getattr(self, '_is_imagebind', False):
+                try:
+                    from imagebind import ModalityType
+                    # ImageBind expects (B, 1, mel_bins, time_steps)
+                    audio_input = audios.transpose(2, 3)
+                    inputs = {ModalityType.AUDIO: audio_input}
+                    embeddings = self.imagebind(inputs)
+                    a_global = embeddings[ModalityType.AUDIO]  # (B, D)
+                except Exception as e:
+                    print(f"ImageBind audio failed: {e}")
+                    a_global = torch.randn(B, self.audio_dim, device=audios.device)
+            else:
+                # CLIP has no audio encoder - use mel global pooling as proxy
+                mel = audios.squeeze(1)  # (B, T, F)
+                a_global = mel.mean(dim=1)  # (B, F)
+                # Project to audio_dim if needed
+                if a_global.shape[-1] != self.audio_dim:
+                    if not hasattr(self, '_audio_proj'):
+                        self._audio_proj = nn.Linear(a_global.shape[-1], self.audio_dim).to(audios.device)
+                        nn.init.xavier_uniform_(self._audio_proj.weight)
+                        self._audio_proj.requires_grad_(False)
+                    a_global = self._audio_proj(a_global)
 
         return a_global
 

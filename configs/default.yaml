@@ -3,7 +3,7 @@
 # Project paths
 project:
   name: "DeltaV2A"
-  root_dir: "/Users/heoyumin/Projects/Python/DeltaV2A"
+  root_dir: "/Volumes/T31/MARG/DeltaV2A"
   data_dir: "${project.root_dir}/data"
   output_dir: "${project.root_dir}/outputs"
   checkpoint_dir: "${project.root_dir}/checkpoints"
@@ -14,7 +14,7 @@ data:
   image:
     resolution: 512
     channels: 3
-    mean: [0.485, 0.456, 0.406]  # ImageNet stats
+    mean: [0.485, 0.456, 0.406] # ImageNet stats
     std: [0.229, 0.224, 0.225]
   audio:
     sample_rate: 16000
@@ -22,8 +22,8 @@ data:
     n_mels: 64
     n_fft: 1024
     target_lufs: -14
-    segment_length: 16  # beats (8-bar)
-    mel_time_steps: 800  # T_mel
+    segment_length: 16 # beats (8-bar)
+    mel_time_steps: 800 # T_mel
 
 # Model architecture
 model:
@@ -33,24 +33,24 @@ model:
   head_dim: 64
 
   # Token dimensions
-  N_v: 256  # Number of vision tokens
-  N_a: 256  # Number of audio tokens
-  D: 512    # Token embedding dimension
+  N_v: 256 # Number of vision tokens
+  N_a: 256 # Number of audio tokens
+  D: 512 # Token embedding dimension
 
   # Visual encoder
   visual:
     low_level_dim: 256
-    high_level_dim: 512  # CLIP dim
+    high_level_dim: 512 # CLIP dim
     delta_dim: 512
     resnet_backbone: "resnet18"
     clip_model: "ViT-L/14"
 
   # Prior
   prior:
-    alpha: 0.3  # hard/soft balance
+    alpha: 0.3 # hard/soft balance
     entropy_min: 0.5
     sparsity_max: 5.0
-    epsilon_prior: 0.5  # δC constraint
+    epsilon_prior: 0.5 # δC constraint
     imagebind_model: "imagebind_huge"
 
   # Delta mapping
@@ -62,18 +62,18 @@ model:
   # S Encoder (Stage 1)
   s_encoder:
     backbone: "resnet18"
-    in_channels: 2  # Concat mel spectrograms
+    in_channels: 2 # Concat mel spectrograms
     hidden_dim: 512
     out_features: 512
 
   # Audio generator
   audio_generator:
     backbone: "audioldm"
-    pretrained_model: "cvssp/audioldm-s-full-v2"  # HuggingFace model
+    pretrained_model: "cvssp/audioldm-s-full-v2" # HuggingFace model
     pretrained: true
     use_lora: true
     lora_rank: 4
-    feature_dim: 512  # U-Net feature dimension
+    feature_dim: 512 # U-Net feature dimension
 
 # Training general
 training:
@@ -105,5 +105,5 @@ logging:
 
 # Hardware
 hardware:
-  device: "cuda"  # Will be set to 'cpu' if CUDA unavailable
+  device: "cuda" # Will be set to 'cpu' if CUDA unavailable
   num_gpus: 1

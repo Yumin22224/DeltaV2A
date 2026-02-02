@@ -7,13 +7,26 @@ Tests:
 2. Hard/Soft prior properties
 3. Entropy and sparsity constraints
 
-Based on System Specification v2, Section 3
+Based on System Specification v2.2, Section 3
 """
 
 import os
 import sys
 import argparse
+import warnings
 from pathlib import Path
+
+# Suppress ObjC class conflict warnings on macOS (cv2 vs av dylib collision)
+# This must be set before importing cv2 or av
+os.environ.setdefault("OBJC_DISABLE_INITIALIZE_FORK_SAFETY", "YES")
+
+# Suppress known harmless Python warnings
+# - pkg_resources deprecation from imagebind/data.py (upstream issue)
+# - open_clip QuickGELU mismatch (cosmetic, does not affect output)
+# - pyloudnorm clipping warning (expected for some audio normalization)
+warnings.filterwarnings("ignore", message=".*pkg_resources is deprecated.*")
+warnings.filterwarnings("ignore", message=".*QuickGELU mismatch.*")
+warnings.filterwarnings("ignore", message=".*Possible clipped samples.*")
 
 import torch
 import torch.nn as nn
@@ -277,9 +290,23 @@ def test_custom_pairs(args, config, prior_estimator):
 def main():
     args = parse_args()
 
-    # Load config
-    config = OmegaConf.load(args.config)
+    # Load config with defaults
+    config_path = Path(args.config)
+    default_config_path = config_path.parent / "default.yaml"
+
+    # Load default config first
+    if default_config_path.exists():
+        config = OmegaConf.load(default_config_path)
+        # Merge with stage-specific config
+        stage_config = OmegaConf.load(args.config)
+        config = OmegaConf.merge(config, stage_config)
+    else:
+        config = OmegaConf.load(args.config)
+
     print(f"Loaded config from {args.config}")
+
+    # Resolve variable interpolations
+    OmegaConf.resolve(config)
 
     # Set device
     device = torch.device(args.device)

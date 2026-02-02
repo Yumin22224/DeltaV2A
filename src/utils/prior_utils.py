@@ -14,12 +14,15 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
-import cv2
+
+from src.data.transforms import AudioTransform, ImageTransform
 
 
 def preprocess_test_image(image_path: str, resolution: int = 512) -> torch.Tensor:
     """
     Preprocess arbitrary image for Prior testing
+
+    Delegates to ImageTransform for consistent preprocessing.
 
     Args:
         image_path: Path to image file
@@ -28,25 +31,8 @@ def preprocess_test_image(image_path: str, resolution: int = 512) -> torch.Tenso
     Returns:
         image: (1, 3, H, W) tensor
     """
-    from PIL import Image
-    import torchvision.transforms as T
-
-    # Load image
-    img = Image.open(image_path).convert('RGB')
-
-    # Transform
-    transform = T.Compose([
-        T.Resize(resolution),
-        T.CenterCrop(resolution),
-        T.ToTensor(),
-        T.Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225]
-        ),
-    ])
-
-    img_tensor = transform(img).unsqueeze(0)  # (1, 3, H, W)
-
+    transform = ImageTransform(resolution=resolution)
+    img_tensor = transform(image_path).unsqueeze(0)  # (1, 3, H, W)
     return img_tensor
 
 
@@ -60,6 +46,8 @@ def preprocess_test_audio(
     Preprocess arbitrary audio for Prior testing
     Supports mp3, wav, flac, etc.
 
+    Delegates to AudioTransform for consistent preprocessing.
+
     Args:
         audio_path: Path to audio file (mp3, wav, etc.)
         sample_rate: Target sample rate
@@ -69,52 +57,15 @@ def preprocess_test_audio(
     Returns:
         audio_mel: (1, 1, T, F) mel spectrogram
     """
-    import torchaudio
-    import librosa
-
-    # Try torchaudio first (supports mp3)
-    try:
-        waveform, sr = torchaudio.load(audio_path)
-
-        # Convert to mono
-        if waveform.shape[0] > 1:
-            waveform = torch.mean(waveform, dim=0, keepdim=True)
-
-        # Resample
-        if sr != sample_rate:
-            resampler = torchaudio.transforms.Resample(sr, sample_rate)
-            waveform = resampler(waveform)
-
-    except Exception as e:
-        print(f"torchaudio failed ({e}), trying librosa...")
-        # Fallback to librosa
-        waveform_np, sr = librosa.load(audio_path, sr=sample_rate, mono=True)
-        waveform = torch.from_numpy(waveform_np).unsqueeze(0).float()
-
-    # Mel spectrogram
-    mel_transform = torchaudio.transforms.MelSpectrogram(
+    transform = AudioTransform(
         sample_rate=sample_rate,
-        n_fft=1024,
-        hop_length=160,
         n_mels=n_mels,
+        mel_time_steps=mel_time_steps,
     )
+    audio_result = transform(audio_path)
+    mel_spec = audio_result['mel']  # (1, n_mels, T) from AudioTransform
 
-    mel_spec = mel_transform(waveform)  # (1, n_mels, T)
-
-    # Log scale
-    mel_spec = torch.log(mel_spec + 1e-8)
-
-    # Normalize
-    mel_spec = (mel_spec - mel_spec.mean()) / (mel_spec.std() + 1e-8)
-
-    # Adjust time dimension
-    if mel_spec.shape[-1] < mel_time_steps:
-        padding = mel_time_steps - mel_spec.shape[-1]
-        mel_spec = F.pad(mel_spec, (0, padding))
-    elif mel_spec.shape[-1] > mel_time_steps:
-        mel_spec = mel_spec[..., :mel_time_steps]
-
-    # Reshape to (1, 1, T, F)
+    # Reshape to (1, 1, T, F) expected by Prior models
     mel_spec = mel_spec.transpose(1, 2).unsqueeze(0)  # (1, 1, T, n_mels)
 
     return mel_spec
@@ -126,17 +77,20 @@ def validate_c_prior(
     sparsity_max: float = 5.0,
 ) -> Dict[str, any]:
     """
-    Validate C_prior properties according to Spec v2
+    Validate C_prior properties according to Spec v2.2
 
     C_prior should satisfy:
-    1. Entropy constraint: H(C_prior) > H_min
-    2. Sparsity constraint: ||C_prior||_1 < S_max
+    1. Entropy constraint: H(C_prior) > H_min = 0.5 (prevents one-hot)
+    2. Sparsity constraint: IPR(C_prior) < S_max = 5.0 (prevents uniform)
+       IPR = Inverse Participation Ratio = 1 / sum(p_i^2) per token
+       - Uniform over K=6 heads: IPR = 6 (maximum)
+       - One-hot: IPR = 1 (minimum)
     3. Probability distribution: sum(C_prior[i, :]) = 1 for each token
 
     Args:
         C_prior: (B, N_v, 6) coupling tensor
         entropy_min: Minimum entropy threshold
-        sparsity_max: Maximum sparsity threshold
+        sparsity_max: Maximum IPR threshold
 
     Returns:
         validation_results: Dictionary with validation metrics
@@ -168,14 +122,17 @@ def validate_c_prior(
                 f"Batch {b}: Low entropy {avg_entropy:.3f} < {entropy_min}"
             )
 
-        # 2. Sparsity check
-        sparsity = torch.norm(C, p=1).item()
-        results['sparsity'].append(sparsity)
+        # 2. Sparsity check via IPR (Inverse Participation Ratio)
+        # IPR = 1 / sum(p_i^2) per token, averaged over all tokens
+        # High IPR = uniform (bad), Low IPR = sparse/one-hot
+        ipr_per_token = 1.0 / ((C ** 2).sum(dim=-1) + eps)  # (N_v,)
+        avg_ipr = ipr_per_token.mean().item()
+        results['sparsity'].append(avg_ipr)
 
-        if sparsity > sparsity_max:
+        if avg_ipr > sparsity_max:
             results['passed'] = False
             results['violations'].append(
-                f"Batch {b}: High sparsity {sparsity:.3f} > {sparsity_max}"
+                f"Batch {b}: High IPR {avg_ipr:.3f} > {sparsity_max} (too uniform)"
             )
 
         # 3. Probability sum check (should be ~1 per token)

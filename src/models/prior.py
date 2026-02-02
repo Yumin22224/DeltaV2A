@@ -511,32 +511,17 @@ class SoftPrior(nn.Module):
         )
 
     def _load_imagebind(self, model_name: str):
-        """Load ImageBind or fallback to CLIP"""
-        try:
-            # Try to load actual ImageBind
-            import imagebind
-            from imagebind.models import imagebind_model
+        """Load ImageBind or fallback to CLIP using centralized loader"""
+        from src.utils.model_loaders import load_imagebind_or_clip
 
-            model = imagebind_model.imagebind_huge(pretrained=True)
-            print("Loaded ImageBind successfully")
+        model, self._is_imagebind = load_imagebind_or_clip(freeze=True)
+
+        if self._is_imagebind:
+            # ImageBind handles both vision and audio natively
             return model, model
-
-        except ImportError:
-            # Fallback to CLIP
-            print("ImageBind not available, using CLIP as fallback")
-            try:
-                import open_clip
-
-                vision_model, _, _ = open_clip.create_model_and_transforms(
-                    'ViT-L-14', pretrained='openai'
-                )
-
-                # Use same model for audio (placeholder)
-                return vision_model, vision_model
-
-            except ImportError:
-                print("Warning: Neither ImageBind nor CLIP available")
-                return nn.Identity(), nn.Identity()
+        else:
+            # CLIP fallback: vision only, audio handled separately in extract_tokens
+            return model, model
 
     def initialize_head_queries(self, text_prompts: Dict[str, str]):
         """
@@ -544,10 +529,9 @@ class SoftPrior(nn.Module):
         """
         try:
             import open_clip
+            from src.utils.model_loaders import load_clip
 
-            model, _, _ = open_clip.create_model_and_transforms(
-                'ViT-L-14', pretrained='openai'
-            )
+            model = load_clip(freeze=True)
             tokenizer = open_clip.get_tokenizer('ViT-L-14')
 
             with torch.no_grad():
@@ -578,6 +562,9 @@ class SoftPrior(nn.Module):
         """
         Extract v_tokens and a_tokens
 
+        Uses ImageBind for both modalities when available.
+        Falls back to CLIP for vision only (audio uses mel-based projection).
+
         Args:
             images: (B, 3, H, W)
             audios: (B, 1, T, F) mel spectrograms
@@ -589,25 +576,155 @@ class SoftPrior(nn.Module):
         B = images.shape[0]
 
         with torch.no_grad():
-            # Extract visual tokens
             if isinstance(self.vision_model, nn.Identity):
                 v_tokens = torch.randn(B, self.N_v, self.head_dim, device=images.device)
+                a_tokens = torch.randn(B, self.N_a, self.head_dim, device=audios.device)
+
+            elif getattr(self, '_is_imagebind', False):
+                # ImageBind: proper multimodal token extraction
+                v_tokens = self._extract_imagebind_vision(images)
+                a_tokens = self._extract_imagebind_audio(audios)
             else:
-                try:
-                    v_features = self.vision_model.encode_image(images)
-
-                    # Expand to tokens (simplified - actual ImageBind returns patches)
-                    if v_features.dim() == 2:
-                        v_tokens = v_features.unsqueeze(1).expand(-1, self.N_v, -1)
-                    else:
-                        v_tokens = v_features
-                except:
-                    v_tokens = torch.randn(B, self.N_v, self.head_dim, device=images.device)
-
-            # Extract audio tokens (placeholder - actual implementation needs audio encoder)
-            a_tokens = torch.randn(B, self.N_a, self.head_dim, device=audios.device)
+                # CLIP fallback: vision tokens from CLIP, audio from mel projection
+                v_tokens = self._extract_clip_vision(images)
+                a_tokens = self._extract_audio_from_mel(audios)
 
         return v_tokens, a_tokens
+
+    def _extract_imagebind_vision(self, images: torch.Tensor) -> torch.Tensor:
+        """Extract vision tokens using ImageBind"""
+        from imagebind.data import load_and_transform_vision_data
+        from imagebind import ModalityType
+
+        B = images.shape[0]
+
+        try:
+            # ImageBind forward with vision modality
+            inputs = {ModalityType.VISION: images}
+            embeddings = self.vision_model(inputs)
+            v_features = embeddings[ModalityType.VISION]  # (B, D)
+
+            # Expand to N_v tokens
+            if v_features.dim() == 2:
+                v_tokens = v_features.unsqueeze(1).expand(-1, self.N_v, -1)
+            else:
+                v_tokens = v_features
+
+            # Project to head_dim if needed
+            if v_tokens.shape[-1] != self.head_dim:
+                v_tokens = F.adaptive_avg_pool1d(
+                    v_tokens.transpose(1, 2), self.head_dim
+                ).transpose(1, 2)
+
+            # Pad/truncate to N_v tokens
+            if v_tokens.shape[1] < self.N_v:
+                v_tokens = v_tokens.expand(-1, self.N_v, -1)
+            elif v_tokens.shape[1] > self.N_v:
+                v_tokens = v_tokens[:, :self.N_v, :]
+
+        except Exception as e:
+            print(f"ImageBind vision extraction failed: {e}")
+            v_tokens = torch.randn(B, self.N_v, self.head_dim, device=images.device)
+
+        return v_tokens
+
+    def _extract_imagebind_audio(self, audios: torch.Tensor) -> torch.Tensor:
+        """Extract audio tokens using ImageBind"""
+        from imagebind import ModalityType
+
+        B = audios.shape[0]
+
+        try:
+            # ImageBind expects audio as (B, 1, mel_bins, time_steps)
+            # Our input is (B, 1, T, F) - transpose to (B, 1, F, T)
+            audio_input = audios.transpose(2, 3)
+
+            inputs = {ModalityType.AUDIO: audio_input}
+            embeddings = self.vision_model(inputs)
+            a_features = embeddings[ModalityType.AUDIO]  # (B, D)
+
+            # Expand to N_a tokens
+            if a_features.dim() == 2:
+                a_tokens = a_features.unsqueeze(1).expand(-1, self.N_a, -1)
+            else:
+                a_tokens = a_features
+
+            # Project to head_dim if needed
+            if a_tokens.shape[-1] != self.head_dim:
+                a_tokens = F.adaptive_avg_pool1d(
+                    a_tokens.transpose(1, 2), self.head_dim
+                ).transpose(1, 2)
+
+            # Pad/truncate to N_a tokens
+            if a_tokens.shape[1] < self.N_a:
+                a_tokens = a_tokens.expand(-1, self.N_a, -1)
+            elif a_tokens.shape[1] > self.N_a:
+                a_tokens = a_tokens[:, :self.N_a, :]
+
+        except Exception as e:
+            print(f"ImageBind audio extraction failed: {e}")
+            a_tokens = torch.randn(B, self.N_a, self.head_dim, device=audios.device)
+
+        return a_tokens
+
+    def _extract_clip_vision(self, images: torch.Tensor) -> torch.Tensor:
+        """Extract vision tokens using CLIP (fallback)"""
+        B = images.shape[0]
+
+        try:
+            v_features = self.vision_model.encode_image(images)
+
+            if v_features.dim() == 2:
+                v_tokens = v_features.unsqueeze(1).expand(-1, self.N_v, -1)
+            else:
+                v_tokens = v_features
+
+            # Project to head_dim if needed
+            if v_tokens.shape[-1] != self.head_dim:
+                v_tokens = F.adaptive_avg_pool1d(
+                    v_tokens.transpose(1, 2), self.head_dim
+                ).transpose(1, 2)
+
+        except Exception:
+            v_tokens = torch.randn(B, self.N_v, self.head_dim, device=images.device)
+
+        return v_tokens
+
+    def _extract_audio_from_mel(self, audios: torch.Tensor) -> torch.Tensor:
+        """
+        Extract audio tokens from mel spectrogram when ImageBind is unavailable.
+
+        Uses a learned linear projection from mel features to token space,
+        initialized lazily on first use.
+        """
+        B = audios.shape[0]
+
+        # Lazy initialization of mel projection layer
+        if not hasattr(self, '_mel_proj'):
+            mel_dim = audios.shape[-1]  # F (n_mels)
+            self._mel_proj = nn.Linear(mel_dim, self.head_dim).to(audios.device)
+            # Initialize with small random weights
+            nn.init.xavier_uniform_(self._mel_proj.weight)
+            self._mel_proj.requires_grad_(False)
+
+        # audios: (B, 1, T, F)
+        mel = audios.squeeze(1)  # (B, T, F)
+
+        # Project each time step to head_dim
+        a_tokens_full = self._mel_proj(mel)  # (B, T, head_dim)
+
+        # Subsample/pool to N_a tokens
+        T = a_tokens_full.shape[1]
+        if T >= self.N_a:
+            # Uniform subsample
+            indices = torch.linspace(0, T - 1, self.N_a).long().to(audios.device)
+            a_tokens = a_tokens_full[:, indices, :]
+        else:
+            # Pad by repeating
+            repeats = (self.N_a + T - 1) // T
+            a_tokens = a_tokens_full.repeat(1, repeats, 1)[:, :self.N_a, :]
+
+        return a_tokens
 
     def compute_coupling(
         self,
@@ -634,11 +751,11 @@ class SoftPrior(nn.Module):
         # Step 2: Head pooling
         Q_norm = F.normalize(self.head_queries, dim=-1).to(v_tokens.device)  # (6, D)
         a_norm_t = a_norm.transpose(1, 2)  # (B, D, N_a)
-        a_heads = torch.matmul(Q_norm, a_norm_t)  # (6, B, N_a)
-        a_heads = a_heads.permute(1, 0, 2)  # (B, 6, N_a)
+        # Use einsum for clear batched matmul: Q_norm (6, D) x a_norm_t (B, D, N_a) -> (B, 6, N_a)
+        a_heads = torch.einsum('hd,bdn->bhn', Q_norm, a_norm_t)  # (B, 6, N_a)
 
         # Step 3: Coupling
-        C_soft = torch.bmm(sim, a_heads.transpose(1, 2))  # (B, N_v, 6)
+        C_soft = torch.bmm(sim, a_heads.transpose(1, 2))  # (B, N_v, N_a) x (B, N_a, 6) = (B, N_v, 6)
 
         # Step 4: Normalize
         C_soft = F.softmax(C_soft, dim=-1)
