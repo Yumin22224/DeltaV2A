@@ -1,0 +1,63 @@
+# Delta V2A Experiment Configuration
+# Core hypothesis: ΔV → ΔA mapping is learnable with context modulation
+
+project:
+  name: "delta_v2a"
+  root_dir: "."
+
+# Data configuration
+data:
+  dataset_path: "${project.root_dir}/data/delta_pairs"
+  # Expected structure:
+  #   delta_pairs/
+  #     pairs.json  # {"pairs": [{"a_init": "...", "a_edit": "...", "i_init": "...", "i_edit": "...", "valid": true}, ...]}
+  #     audios/     # Audio files
+  #     images/     # Image files
+
+  audio:
+    sample_rate: 16000
+    n_mels: 64
+    n_fft: 1024
+    hop_length: 160
+    target_lufs: -14.0
+    mel_time_steps: 800
+
+  image:
+    resolution: 224  # ImageBind uses 224x224
+    mean: [0.485, 0.456, 0.406]
+    std: [0.229, 0.224, 0.225]
+
+# Model configuration
+model:
+  # ImageBind embedding dimension
+  embed_dim: 1024
+
+  # Delta Mapper architecture
+  delta_mapper:
+    hidden_dim: 512
+    num_layers: 3
+    dropout: 0.1
+
+# Training configuration
+training:
+  batch_size: 16
+  num_epochs: 100
+  learning_rate: 1e-4
+  weight_decay: 1e-5
+
+  # Loss weights
+  loss:
+    l2_weight: 1.0
+    cosine_weight: 1.0
+
+  # Logging
+  log_interval: 10
+  save_interval: 10
+
+  # Validation
+  val_split: 0.1
+
+# Output configuration
+output:
+  checkpoint_dir: "${project.root_dir}/checkpoints"
+  log_dir: "${project.root_dir}/logs"

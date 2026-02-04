@@ -1,109 +1,55 @@
 # DeltaV2A Default Configuration
 
-# Project paths
 project:
   name: "DeltaV2A"
   root_dir: "/Volumes/T31/MARG/DeltaV2A"
-  data_dir: "${project.root_dir}/data"
-  output_dir: "${project.root_dir}/outputs"
-  checkpoint_dir: "${project.root_dir}/checkpoints"
-  log_dir: "${project.root_dir}/logs"
 
 # Data configuration
 data:
+  dataset_path: "${project.root_dir}/data/delta_pairs"
   image:
-    resolution: 512
-    channels: 3
-    mean: [0.485, 0.456, 0.406] # ImageNet stats
+    resolution: 224  # ImageBind uses 224x224
+    mean: [0.485, 0.456, 0.406]
     std: [0.229, 0.224, 0.225]
   audio:
     sample_rate: 16000
     hop_length: 160
     n_mels: 64
     n_fft: 1024
-    target_lufs: -14
-    segment_length: 16 # beats (8-bar)
-    mel_time_steps: 800 # T_mel
+    target_lufs: -14.0
+    mel_time_steps: 800
 
 # Model architecture
 model:
-  # Head taxonomy
-  num_heads: 6
-  head_names: ["rhythm", "harmony", "energy", "timbre", "space", "texture"]
-  head_dim: 64
+  embed_dim: 1024  # ImageBind embedding dimension
 
-  # Token dimensions
-  N_v: 256 # Number of vision tokens
-  N_a: 256 # Number of audio tokens
-  D: 512 # Token embedding dimension
-
-  # Visual encoder
-  visual:
-    low_level_dim: 256
-    high_level_dim: 512 # CLIP dim
-    delta_dim: 512
-    resnet_backbone: "resnet18"
-    clip_model: "ViT-L/14"
-
-  # Prior
-  prior:
-    alpha: 0.3 # hard/soft balance
-    entropy_min: 0.5
-    sparsity_max: 5.0
-    epsilon_prior: 0.5 # δC constraint
-    imagebind_model: "imagebind_huge"
-
-  # Delta mapping
-  delta_mapping:
-    inertia_epsilon: 1.0e-3
-    hidden_dim: 256
-    use_manifold_projection: true
-
-  # S Encoder (Stage 1)
-  s_encoder:
-    backbone: "resnet18"
-    in_channels: 2 # Concat mel spectrograms
+  delta_mapper:
     hidden_dim: 512
-    out_features: 512
+    num_layers: 3
+    dropout: 0.1
 
-  # Audio generator
-  audio_generator:
-    backbone: "audioldm"
-    pretrained_model: "cvssp/audioldm-s-full-v2" # HuggingFace model
-    pretrained: true
-    use_lora: true
-    lora_rank: 4
-    feature_dim: 512 # U-Net feature dimension
-
-# Training general
+# Training
 training:
   seed: 42
+  batch_size: 16
+  num_epochs: 100
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-5
+  val_split: 0.1
+
+  loss:
+    l2_weight: 1.0
+    cosine_weight: 1.0
+
+  log_interval: 10
+  save_interval: 10
   num_workers: 4
-  pin_memory: true
-  mixed_precision: true
-  gradient_clip: 1.0
 
-# Optimizer
-optimizer:
-  name: "AdamW"
-  lr: 1.0e-4
-  weight_decay: 1.0e-2
-  betas: [0.9, 0.999]
-
-# Scheduler
-scheduler:
-  name: "CosineAnnealingLR"
-  T_max: 100
-  eta_min: 1.0e-6
-
-# Logging
-logging:
-  use_wandb: true
-  wandb_project: "DeltaV2A"
-  log_every_n_steps: 10
-  save_every_n_epochs: 5
+# Output
+output:
+  checkpoint_dir: "${project.root_dir}/checkpoints"
+  log_dir: "${project.root_dir}/logs"
 
 # Hardware
 hardware:
-  device: "cuda" # Will be set to 'cpu' if CUDA unavailable
-  num_gpus: 1
+  device: "cuda"

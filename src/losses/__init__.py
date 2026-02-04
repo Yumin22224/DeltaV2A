@@ -1,47 +1,7 @@
 """
 Loss functions for DeltaV2A training
+
+Note: Main loss (DeltaLoss) is in src/models/delta_mapper.py
 """
 
-from .losses import (
-    # Stage 1
-    ReconstructionLoss,
-    MultiResolutionSTFTLoss,
-    StructurePreservationLoss,
-    PairwiseRankingLoss,
-    RankConsistencyLoss,
-    # Stage 2-A
-    PseudoTargetLoss,
-    ManifoldLoss,
-    IdentityLoss,
-    MonotonicityLoss,
-    # Stage 2-B
-    ConditionalPreservationLoss,
-    CoherenceLoss,
-    ConsistencyLoss,
-    # Stage 2-C
-    DirectionLoss,
-    BoundedVarianceLoss,
-    PriorRegularizationLoss,
-)
-
-__all__ = [
-    # Stage 1
-    "ReconstructionLoss",
-    "MultiResolutionSTFTLoss",
-    "StructurePreservationLoss",
-    "PairwiseRankingLoss",
-    "RankConsistencyLoss",
-    # Stage 2-A
-    "PseudoTargetLoss",
-    "ManifoldLoss",
-    "IdentityLoss",
-    "MonotonicityLoss",
-    # Stage 2-B
-    "ConditionalPreservationLoss",
-    "CoherenceLoss",
-    "ConsistencyLoss",
-    # Stage 2-C
-    "DirectionLoss",
-    "BoundedVarianceLoss",
-    "PriorRegularizationLoss",
-]
+__all__ = []
