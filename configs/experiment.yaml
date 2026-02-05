@@ -1,63 +1,65 @@
-# Delta V2A Experiment Configuration
-# Core hypothesis: ΔV → ΔA mapping is learnable with context modulation
-
-project:
-  name: "delta_v2a"
-  root_dir: "."
+# Delta Correspondence Experiment Configuration
+# Goal: Verify semantic correspondence between ΔV (image effects) and ΔA (audio effects)
 
 # Data configuration
 data:
-  dataset_path: "${project.root_dir}/data/delta_pairs"
-  # Expected structure:
-  #   delta_pairs/
-  #     pairs.json  # {"pairs": [{"a_init": "...", "a_edit": "...", "i_init": "...", "i_edit": "...", "valid": true}, ...]}
-  #     audios/     # Audio files
-  #     images/     # Image files
+  root_dir: "data/experiment"
 
-  audio:
-    sample_rate: 16000
-    n_mels: 64
-    n_fft: 1024
-    hop_length: 160
-    target_lufs: -14.0
-    mel_time_steps: 800
+  # Subdirectories for raw data
+  # TODO: Place your data here
+  image_subdir: "images"   # Landscape images
+  audio_subdir: "audio"    # 4-bar electronic music clips (WAV/MP3)
 
+  # Limits for processing
+  max_images: 100
+  max_audio: 100
+
+  # Audio settings
+  sample_rate: 16000
+
+# Effect configuration
+effects:
+  # Intensity levels: low, mid, high
+  intensities:
+    - "low"
+    - "mid"
+    - "high"
+
+  # Image effects
   image:
-    resolution: 224  # ImageBind uses 224x224
-    mean: [0.485, 0.456, 0.406]
-    std: [0.229, 0.224, 0.225]
+    types:
+      - "brightness"  # +10%, +25%, +40%
+      - "contrast"    # +10%, +25%, +40%
+      - "saturation"  # +10%, +25%, +40%
+      - "blur"        # sigma 1.0, 2.0, 3.0
+
+  # Audio effects
+  audio:
+    types:
+      - "lpf"         # cutoff 10k, 6k, 3k Hz
+      - "highshelf"   # +2, +5, +8 dB at 8kHz
+      - "saturation"  # drive +3, +6, +9 dB
+      - "reverb"      # wet 10%, 25%, 40%
+
+# Hypothesized effect type mapping (for retrieval evaluation)
+# Image effect -> Audio effect
+effect_mapping:
+  blur: "lpf"              # Blur ↔ Low-pass (both reduce high-frequency content)
+  brightness: "highshelf"  # Brightness ↔ High-shelf (both affect "brightness")
+  contrast: "saturation"   # Contrast ↔ Saturation (both affect dynamic range/richness)
+  saturation: "reverb"     # Saturation ↔ Reverb (tentative)
 
 # Model configuration
 model:
-  # ImageBind embedding dimension
+  name: "imagebind"
   embed_dim: 1024
 
-  # Delta Mapper architecture
-  delta_mapper:
-    hidden_dim: 512
-    num_layers: 3
-    dropout: 0.1
+# Statistical analysis
+n_permutations: 1000
 
-# Training configuration
-training:
-  batch_size: 16
-  num_epochs: 100
-  learning_rate: 1e-4
-  weight_decay: 1e-5
-
-  # Loss weights
-  loss:
-    l2_weight: 1.0
-    cosine_weight: 1.0
-
-  # Logging
-  log_interval: 10
-  save_interval: 10
-
-  # Validation
-  val_split: 0.1
+# Device
+device: "mps"  # or "cuda" or "cpu"
 
 # Output configuration
 output:
-  checkpoint_dir: "${project.root_dir}/checkpoints"
-  log_dir: "${project.root_dir}/logs"
+  dir: "outputs/experiment"
