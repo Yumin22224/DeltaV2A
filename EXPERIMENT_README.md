@@ -72,7 +72,7 @@ DeltaV2A/
 | contrast | saturation | 둘 다 dynamic range/richness 증가 |
 | saturation | reverb | (검토 필요) |
 
-이 매핑은 Phase 1 결과를 보고 조정해야 할 수 있음.
+이 매핑은 예시로, Phase 1 결과를 보고 조정해야 함.
 
 ---
 

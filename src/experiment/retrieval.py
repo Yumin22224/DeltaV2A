@@ -79,21 +79,25 @@ class DeltaRetrieval:
         self,
         query_dataset: DeltaDataset,  # Image deltas
         database_dataset: DeltaDataset,  # Audio deltas
+        alignment,  # CCAAlignment object
         effect_type_mapping: Optional[Dict[str, str]] = None,
     ):
         """
         Args:
             query_dataset: Dataset of image deltas (queries)
             database_dataset: Dataset of audio deltas (database)
+            alignment: CCAAlignment for cross-modal alignment (required)
             effect_type_mapping: Mapping from image effect to expected audio effect
                                  e.g., {"blur": "lpf", "brightness": "highshelf"}
         """
         self.query_deltas = query_dataset.deltas
         self.database_deltas = database_dataset.deltas
+        self.alignment = alignment
         self.effect_type_mapping = effect_type_mapping or {}
 
-        # Build database matrix
-        self.database_matrix = np.stack([d.delta for d in self.database_deltas])
+        # Build database matrix and align
+        database_matrix_raw = np.stack([d.delta for d in self.database_deltas])
+        self.database_matrix = self.alignment.transform_audio(database_matrix_raw)  # Align audio
 
     def retrieve(
         self,
@@ -105,7 +109,7 @@ class DeltaRetrieval:
         Retrieve top-k most similar audio deltas.
 
         Args:
-            query_delta: (D,) query delta vector
+            query_delta: (D,) query delta vector (image delta, 768d)
             top_k: Number of results to return
             normalize: Whether to L2-normalize before computing similarity
 
@@ -113,10 +117,13 @@ class DeltaRetrieval:
             indices: Top-k indices in database
             similarities: Corresponding similarity scores
         """
+        # Align query (image delta) to shared space
+        query_aligned = self.alignment.transform_image(query_delta.reshape(1, -1))[0]
+
         if normalize:
-            query_norm = np.linalg.norm(query_delta)
+            query_norm = np.linalg.norm(query_aligned)
             if query_norm > 0:
-                query_delta = query_delta / query_norm
+                query_aligned = query_aligned / query_norm
 
             db_norms = np.linalg.norm(self.database_matrix, axis=1, keepdims=True)
             db_norms = np.where(db_norms > 0, db_norms, 1.0)
@@ -125,7 +132,7 @@ class DeltaRetrieval:
             database = self.database_matrix
 
         # Compute similarities
-        similarities = database @ query_delta
+        similarities = database @ query_aligned
 
         # Sort by similarity (descending)
         sorted_indices = np.argsort(similarities)[::-1]

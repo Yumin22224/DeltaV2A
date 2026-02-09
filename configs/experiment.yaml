@@ -1,65 +1,75 @@
 # Delta Correspondence Experiment Configuration
-# Goal: Verify semantic correspondence between ΔV (image effects) and ΔA (audio effects)
+# Phase 0-2: Experimental validation and discovery
 
 # Data configuration
 data:
   root_dir: "data/experiment"
-
-  # Subdirectories for raw data
-  # TODO: Place your data here
-  image_subdir: "images"   # Landscape images
-  audio_subdir: "audio"    # 4-bar electronic music clips (WAV/MP3)
-
-  # Limits for processing
-  max_images: 100
-  max_audio: 100
-
-  # Audio settings
-  sample_rate: 16000
-
-# Effect configuration
-effects:
-  # Intensity levels: low, mid, high
-  intensities:
-    - "low"
-    - "mid"
-    - "high"
-
-  # Image effects
-  image:
-    types:
-      - "brightness"  # +10%, +25%, +40%
-      - "contrast"    # +10%, +25%, +40%
-      - "saturation"  # +10%, +25%, +40%
-      - "blur"        # sigma 1.0, 2.0, 3.0
-
-  # Audio effects
-  audio:
-    types:
-      - "lpf"         # cutoff 10k, 6k, 3k Hz
-      - "highshelf"   # +2, +5, +8 dB at 8kHz
-      - "saturation"  # drive +3, +6, +9 dB
-      - "reverb"      # wet 10%, 25%, 40%
-
-# Hypothesized effect type mapping (for retrieval evaluation)
-# Image effect -> Audio effect
-effect_mapping:
-  blur: "lpf"              # Blur ↔ Low-pass (both reduce high-frequency content)
-  brightness: "highshelf"  # Brightness ↔ High-shelf (both affect "brightness")
-  contrast: "saturation"   # Contrast ↔ Saturation (both affect dynamic range/richness)
-  saturation: "reverb"     # Saturation ↔ Reverb (tentative)
+  image_subdir: "images"   # Landscape images organized by category
+  audio_subdir: "audio"    # Electronic music clips
+  max_images: 1000
+  max_audio: 1000
 
 # Model configuration
 model:
-  name: "imagebind"
-  embed_dim: 1024
+  # Primary embedders
+  clip:
+    name: "ViT-L-14"
+    pretrained: "openai"
+    embed_dim: 768
+
+  clap:
+    model_id: 1  # 630k+audioset non-fusion (music)
+    enable_fusion: false
+    embed_dim: 512
+    sample_rate: 48000
+    max_duration: 20.0  # seconds (truncate/pad for batch processing)
+
+  # Cross-modal alignment
+  alignment:
+    method: "cca"
+    n_components: 512
+    fit_on_originals: true
+
+  # Legacy (weights preserved, not used)
+  imagebind:
+    enabled: false
+    embed_dim: 1024
+
+# Phase 0 thresholds
+thresholds:
+  sensitivity:
+    min_distance: 0.01  # Minimum delta norm to be considered sensitive
+
+  linearity:
+    min_cosine: 0.8  # Minimum mean pairwise cosine for consistency
+    max_cv: 0.3  # Maximum CV of norms
+    max_variance: 0.05  # Maximum cross-category variance
+
+# Effects configuration
+effects:
+  intensities: ["low", "mid", "high"]
+
+  image:
+    types: ["brightness", "contrast", "saturation", "blur"]
+
+  audio:
+    types: ["lpf", "highshelf", "saturation", "reverb"]
+
+# Effect mapping (hypothesis for retrieval evaluation)
+effect_mapping:
+  blur: "lpf"
+  brightness: "highshelf"
+  contrast: "saturation"
+  saturation: "reverb"
 
 # Statistical analysis
-n_permutations: 1000
+n_permutations: 10000
+
+# Output
+output:
+  dir: "outputs/experiment"
+  save_plots: true
+  plot_format: "png"
 
 # Device
 device: "mps"  # or "cuda" or "cpu"
-
-# Output configuration
-output:
-  dir: "outputs/experiment"

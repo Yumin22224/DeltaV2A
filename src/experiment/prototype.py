@@ -157,6 +157,7 @@ def compute_prototypes(
 def compute_similarity_matrix(
     image_prototypes: PrototypeSet,
     audio_prototypes: PrototypeSet,
+    alignment,  # CCAAlignment object
     image_effect_types: Optional[List[str]] = None,
     audio_effect_types: Optional[List[str]] = None,
     intensities: Optional[List[str]] = None,
@@ -167,6 +168,7 @@ def compute_similarity_matrix(
     Args:
         image_prototypes: PrototypeSet for images
         audio_prototypes: PrototypeSet for audio
+        alignment: CCAAlignment for cross-modal alignment (required)
         image_effect_types: List of image effect types (default: all)
         audio_effect_types: List of audio effect types (default: all)
         intensities: List of intensities to include
@@ -176,6 +178,9 @@ def compute_similarity_matrix(
         image_labels: Row labels
         audio_labels: Column labels
     """
+    if alignment is None:
+        raise ValueError("alignment is required for cross-modal similarity computation")
+
     if intensities is None:
         intensities = ["low", "mid", "high"]
 
@@ -189,8 +194,16 @@ def compute_similarity_matrix(
         "audio", audio_effect_types, intensities
     )
 
-    # Compute cosine similarity (prototypes are already normalized)
-    sim_matrix = image_matrix @ audio_matrix.T
+    # Apply CCA alignment
+    image_aligned = alignment.transform_image(image_matrix)  # (N, 512)
+    audio_aligned = alignment.transform_audio(audio_matrix)  # (M, 512)
+
+    # Normalize
+    image_norm = image_aligned / (np.linalg.norm(image_aligned, axis=1, keepdims=True) + 1e-8)
+    audio_norm = audio_aligned / (np.linalg.norm(audio_aligned, axis=1, keepdims=True) + 1e-8)
+
+    # Compute cosine similarity
+    sim_matrix = image_norm @ audio_norm.T
 
     return sim_matrix, image_labels, audio_labels
 
@@ -198,6 +211,7 @@ def compute_similarity_matrix(
 def compute_effect_type_similarity(
     image_prototypes: PrototypeSet,
     audio_prototypes: PrototypeSet,
+    alignment,  # CCAAlignment object
     aggregate: str = "mean",
 ) -> Tuple[np.ndarray, List[str], List[str]]:
     """
@@ -228,7 +242,15 @@ def compute_effect_type_similarity(
                 aud_proto = audio_prototypes.get("audio", aud_effect, intensity)
 
                 if img_proto is not None and aud_proto is not None:
-                    sim = float(np.dot(img_proto.vector, aud_proto.vector))
+                    # Apply alignment before computing similarity
+                    img_aligned = alignment.transform_image(img_proto.vector.reshape(1, -1))[0]
+                    aud_aligned = alignment.transform_audio(aud_proto.vector.reshape(1, -1))[0]
+
+                    # Normalize and compute similarity
+                    img_norm = img_aligned / (np.linalg.norm(img_aligned) + 1e-8)
+                    aud_norm = aud_aligned / (np.linalg.norm(aud_aligned) + 1e-8)
+
+                    sim = float(np.dot(img_norm, aud_norm))
                     sims.append(sim)
 
             if sims:

@@ -14,6 +14,36 @@ from .retrieval import DeltaRetrieval, RetrievalMetrics
 
 
 @dataclass
+class DeltaConsistencyResult:
+    """Result of delta consistency analysis for a single (effect_type, intensity)."""
+    modality: str
+    effect_type: str
+    intensity: str
+    n_samples: int
+
+    # Direction consistency (pairwise cosine sim of normalized deltas)
+    mean_pairwise_cosine: float
+    std_pairwise_cosine: float
+    min_pairwise_cosine: float
+    max_pairwise_cosine: float
+
+    # Magnitude consistency (delta norms)
+    mean_norm: float
+    std_norm: float
+    cv_norm: float  # coefficient of variation = std/mean
+
+    @property
+    def is_direction_consistent(self) -> bool:
+        """Direction consistent if mean pairwise cosine > 0.5"""
+        return self.mean_pairwise_cosine > 0.5
+
+    @property
+    def is_magnitude_consistent(self) -> bool:
+        """Magnitude consistent if CV < 0.5"""
+        return self.cv_norm < 0.5
+
+
+@dataclass
 class PermutationTestResult:
     """Result of a permutation test."""
     observed_statistic: float
@@ -330,5 +360,176 @@ def cross_intensity_alignment(
         if len(query_intensities) >= 3:
             rho, _ = stats.spearmanr(query_intensities, best_match_intensities)
             results[f"{img_effect}->{aud_effect}"] = float(rho)
+
+    return results
+
+
+def delta_consistency_analysis(
+    delta_dataset: DeltaDataset,
+    modality: Optional[str] = None,
+) -> Dict[str, DeltaConsistencyResult]:
+    """
+    Analyze if deltas are consistent across different source samples
+    for each fixed (effect_type, intensity).
+
+    For a given effect and intensity, all N source samples should produce
+    delta vectors pointing in a similar direction with similar magnitude.
+
+    Measures:
+        - Direction: pairwise cosine similarity of normalized deltas
+        - Magnitude: coefficient of variation of delta norms
+
+    Args:
+        delta_dataset: Dataset with deltas
+        modality: Filter by modality ("image" or "audio"), or None for both
+
+    Returns:
+        Dict mapping "modality/effect_type/intensity" -> DeltaConsistencyResult
+    """
+    # Group deltas by (modality, effect_type, intensity)
+    groups: Dict[str, list] = {}
+    for d in delta_dataset.deltas:
+        if modality and d.modality != modality:
+            continue
+        key = f"{d.modality}/{d.effect_type}/{d.intensity}"
+        if key not in groups:
+            groups[key] = []
+        groups[key].append(d.delta)
+
+    results = {}
+
+    for key, deltas_list in groups.items():
+        mod, effect_type, intensity = key.split("/")
+        deltas = np.stack(deltas_list)  # (N, D)
+        n = len(deltas)
+
+        # --- Magnitude analysis ---
+        norms = np.linalg.norm(deltas, axis=1)  # (N,)
+        mean_norm = float(np.mean(norms))
+        std_norm = float(np.std(norms))
+        cv_norm = std_norm / mean_norm if mean_norm > 0 else float('inf')
+
+        # --- Direction analysis ---
+        # Normalize deltas to unit vectors
+        safe_norms = np.where(norms > 0, norms, 1.0)
+        normed = deltas / safe_norms[:, np.newaxis]  # (N, D)
+
+        if n >= 2:
+            # Pairwise cosine similarity (= dot product of unit vectors)
+            sim_matrix = normed @ normed.T  # (N, N)
+
+            # Extract upper triangle (exclude diagonal)
+            triu_indices = np.triu_indices(n, k=1)
+            pairwise_sims = sim_matrix[triu_indices]
+
+            mean_cos = float(np.mean(pairwise_sims))
+            std_cos = float(np.std(pairwise_sims))
+            min_cos = float(np.min(pairwise_sims))
+            max_cos = float(np.max(pairwise_sims))
+        else:
+            mean_cos = std_cos = min_cos = max_cos = float('nan')
+
+        results[key] = DeltaConsistencyResult(
+            modality=mod,
+            effect_type=effect_type,
+            intensity=intensity,
+            n_samples=n,
+            mean_pairwise_cosine=mean_cos,
+            std_pairwise_cosine=std_cos,
+            min_pairwise_cosine=min_cos,
+            max_pairwise_cosine=max_cos,
+            mean_norm=mean_norm,
+            std_norm=std_norm,
+            cv_norm=cv_norm,
+        )
+
+    return results
+
+
+def print_consistency_report(
+    results: Dict[str, 'DeltaConsistencyResult'],
+) -> None:
+    """Print a formatted consistency report."""
+    # Group by modality
+    by_modality: Dict[str, list] = {}
+    for key, r in results.items():
+        if r.modality not in by_modality:
+            by_modality[r.modality] = []
+        by_modality[r.modality].append(r)
+
+    for modality, items in sorted(by_modality.items()):
+        print(f"\n{'='*70}")
+        print(f"  {modality.upper()} DELTA CONSISTENCY")
+        print(f"{'='*70}")
+        print(f"  {'effect':<14} {'intens':<6} {'N':>4}  "
+              f"{'cos_mean':>8} {'cos_std':>8} {'cos_min':>8}  "
+              f"{'norm_mean':>9} {'norm_cv':>8}  {'dir':>3} {'mag':>3}")
+        print(f"  {'-'*14} {'-'*6} {'-'*4}  "
+              f"{'-'*8} {'-'*8} {'-'*8}  "
+              f"{'-'*9} {'-'*8}  {'-'*3} {'-'*3}")
+
+        # Sort by effect_type, then intensity
+        intensity_order = {"low": 0, "mid": 1, "high": 2}
+        items.sort(key=lambda r: (r.effect_type, intensity_order.get(r.intensity, 9)))
+
+        for r in items:
+            dir_ok = "O" if r.is_direction_consistent else "X"
+            mag_ok = "O" if r.is_magnitude_consistent else "X"
+            print(f"  {r.effect_type:<14} {r.intensity:<6} {r.n_samples:>4}  "
+                  f"{r.mean_pairwise_cosine:>8.4f} {r.std_pairwise_cosine:>8.4f} {r.min_pairwise_cosine:>8.4f}  "
+                  f"{r.mean_norm:>9.5f} {r.cv_norm:>8.4f}  {dir_ok:>3} {mag_ok:>3}")
+
+
+def spearman_intensity_correlation(
+    retrieval_metrics: Dict[str, RetrievalMetrics],
+) -> Tuple[float, float]:
+    """
+    Spearman's ρ: Intensity 증가에 따라 Similarity/Matching Score가 단조증가하는지 확인
+
+    Args:
+        retrieval_metrics: {intensity: metrics} from evaluate_by_intensity()
+
+    Returns:
+        (rho, p_value)
+    """
+    intensities = ["low", "mid", "high"]
+    intensity_map = {i: idx for idx, i in enumerate(intensities)}
+
+    x = [intensity_map[i] for i in retrieval_metrics.keys() if i in intensity_map]
+    y = [retrieval_metrics[i].mean_reciprocal_rank for i in retrieval_metrics.keys() if i in intensity_map]
+
+    if len(x) >= 3:
+        return stats.spearmanr(x, y)
+    else:
+        return 0.0, 1.0
+
+
+def norm_intensity_analysis(
+    delta_dataset: DeltaDataset,
+) -> Dict[Tuple[str, str], Tuple[float, float]]:
+    """
+    Norm Analysis: 벡터 크기가 이펙트 강도와 상관관계가 있는지 확인
+
+    Returns:
+        {(modality, effect_type): (spearman_rho, p_value)}
+    """
+    intensity_map = {"low": 0, "mid": 1, "high": 2}
+    results = {}
+
+    for modality in ["image", "audio"]:
+        effect_types = set(d.effect_type for d in delta_dataset.deltas if d.modality == modality)
+
+        for effect_type in effect_types:
+            deltas = [
+                d for d in delta_dataset.deltas
+                if d.modality == modality and d.effect_type == effect_type
+            ]
+
+            x = [intensity_map[d.intensity] for d in deltas]
+            y = [np.linalg.norm(d.delta) for d in deltas]
+
+            if len(x) >= 3:
+                rho, pval = stats.spearmanr(x, y)
+                results[(modality, effect_type)] = (float(rho), float(pval))
 
     return results
