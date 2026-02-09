@@ -80,111 +80,99 @@
   - 각 이펙트의 컨텍스트 불변성 검증
 - **의미:** 델타가 선형적이고, 소스 카테고리와 무관하게 일관된 방향을 가지는지 확인
 
----
 
-### 4. `fit_alignment` - Phase 2-a: CCA 정렬 학습
-
-**입력:**
-- `data/images/**/*.{jpg,png}` - 원본 이미지 (증강 X)
-- `data/audio/**/*.{wav,mp3,flac}` - 원본 오디오 (증강 X)
-
-**처리:**
-1. 원본 이미지 임베딩 추출: `(N, 768)` CLIP
-2. 원본 오디오 임베딩 추출: `(N, 512)` CLAP
-3. CCA(Canonical Correlation Analysis) 학습:
-   - 목표: CLIP(768d) ↔ CLAP(512d) 공간 정렬
-   - 방법: 512 components로 projection 학습
-   - 결과: `CCA.transform_image()`, `CCA.transform_audio()`
-
-**출력:**
-- `outputs/cca_alignment.pkl` - CCA 모델 (pickle)
-  - 메서드: `transform_image(X_768) → X_512`
-  - 메서드: `transform_audio(X_512) → X_512`
-- **의미:** 교차모달 유사도 계산을 위한 임베딩 공간 정렬
 
 ---
 
-### 5. `phase1` - Phase 3-a: 프로토타입 발견
+### 4. `phase1` - Phase 1: 텍스트 앵커 기반 발견
 
 **입력:**
 - `outputs/image_deltas.json`
 - `outputs/audio_deltas.json`
-- `outputs/cca_alignment.pkl`
+- CLIP/CLAP 모델 (텍스트 임베딩용)
 
 **처리:**
 1. **프로토타입 계산:**
    - 각 (modality, effect_type, intensity)에 대해:
    - `p(t,s) = E[Δe / ||Δe||]` (정규화된 델타의 평균)
 
-2. **교차모달 유사도 행렬:**
-   - 이미지 프로토타입: CCA로 정렬 → `(N_img_effects, 512)`
-   - 오디오 프로토타입: CCA로 정렬 → `(N_aud_effects, 512)`
-   - 유사도 계산: `cosine_similarity(p_img, p_aud)`
+2. **텍스트 앵커 생성 (Synonym Expansion):**
+   - **이미지 텍스트 앵커:**
+     - 각 이펙트별 동의어 세트 정의 (예: blur → ["blurry", "out of focus", "fuzzy", ...])
+     - 템플릿 적용: "A {synonym} photo of {category}"
+     - 델타 계산: embed("A blurry photo of ocean") - embed("A photo of ocean")
+     - 모든 동의어 × 카테고리 조합에 대해 평균 → 텍스트 앵커 델타
+   - **오디오 텍스트 앵커:**
+     - 동일 방식으로 "A {synonym} {genre} song" 템플릿 사용
 
-3. **시각화:**
+3. **3방향 유사도 계산 (Multiplication):**
+   - 각 (이미지 이펙트, 오디오 이펙트) 쌍에 대해:
+     - `sim1 = cosine(image_prototype, image_text_anchor)`
+     - `sim2 = cosine(audio_prototype, audio_text_anchor)`
+     - `sim3 = cosine(image_text_anchor, audio_text_anchor)`
+     - `final_score = sim1 × sim2 × sim3`  (곱셈 = AND 로직)
+
+4. **Discovery Matrix 생성:**
+   - 행렬 크기: (이미지 이펙트 수) × (오디오 이펙트 수)
+   - 각 셀에 3방향 유사도 점수
+
+5. **시각화:**
    - 히트맵 생성: 이미지 이펙트 × 오디오 이펙트
 
 **출력:**
-- `outputs/image_prototypes.npy` - 이미지 프로토타입 벡터들
-- `outputs/audio_prototypes.npy` - 오디오 프로토타입 벡터들
-- `outputs/similarity_matrix.npy` - 교차모달 유사도 행렬
-- `outputs/similarity_heatmap.png` - 히트맵 이미지
-- **의미:** 어떤 이미지 이펙트가 어떤 오디오 이펙트와 대응되는지 발견
+- `outputs/discovery_matrix.npy` - 3방향 유사도 행렬
+- `outputs/discovery_labels.json` - 이펙트 레이블
+- `outputs/discovery_heatmap.png` - 히트맵 이미지
+- **의미:** 어떤 이미지 이펙트가 어떤 오디오 이펙트와 대응되는지 발견 (텍스트 기반 검증 포함)
 
 ---
 
-### 6. `phase2` - Phase 3-b: 통계적 검증
+### 5. `phase3` - Phase 3: 학습 (Learning - The Decoder)
 
 **입력:**
-- `outputs/image_deltas.json`
-- `outputs/audio_deltas.json`
-- `outputs/cca_alignment.pkl`
+- `outputs/discovery_matrix.npy` - Phase 1에서 발견한 이미지-오디오 이펙트 대응 관계
+- `outputs/discovery_labels.json` - 이펙트 레이블
+- `data/audio/**/*.{wav,mp3,flac}` - 원본 오디오 파일들
+- Discovery Matrix에서 높은 점수를 받은 대응 쌍 (예: blur ↔ lpf, brightness ↔ highshelf)
 
 **처리:**
+1. **학습 데이터셋 생성:**
+   - 원본 오디오 $A_{raw}$ 로드
+   - 각 샘플에 대해:
+     - 랜덤하게 DSP 이펙트 선택 (Discovery Matrix 기반)
+     - 랜덤 파라미터 $P$ 생성 (예: cutoff_freq, gain, decay 등)
+     - 증강 오디오 생성: $A_{aug} = \text{DSP}(A_{raw}, P)$
+     - 텍스트 조건 생성: 대응하는 이미지 이펙트 설명 $E_{cond}$
 
-#### 6-1. 검색 기반 검증 (Retrieval)
-1. 이미지 델타를 쿼리로 사용
-2. 오디오 델타 DB에서 가장 유사한 것 검색
-3. 메트릭 계산:
-   - **MRR (Mean Reciprocal Rank):** 정답의 평균 역순위
-   - **Recall@K:** Top-K 내 정답 비율
-4. 강도별로 집계
+2. **Decoder 아키텍처:**
+   - **입력:**
+     - 원본 오디오 임베딩: $\text{CLAP}(A_{raw})$
+     - 텍스트 조건 임베딩: $\text{CLAP}_{\text{text}}(E_{cond})$
+   - **출력:**
+     - DSP 파라미터 예측: $\hat{P}$
+   - **구조:**
+     - Cross-attention을 통해 텍스트 조건을 오디오에 반영
+     - MLP로 DSP 파라미터 회귀
 
-#### 6-2. 순열 검정 (Permutation Test)
-1. 실제 MRR 계산
-2. 라벨을 무작위로 섞어서 MRR 재계산 (n=1000회)
-3. p-value 계산: `P(random_MRR >= actual_MRR)`
-4. 유의성 판정: `p < 0.05`
-
-#### 6-3. Spearman 상관계수
-1. 강도(low=1, mid=2, high=3)와 MRR 간 상관계수
-2. 가설: 강도가 높을수록 MRR도 높아야 함
-3. 계산: `spearman(intensity_rank, MRR)`
-
-#### 6-4. 노름 분석
-1. 각 이펙트의 델타 노름과 강도 간 상관계수
-2. 가설: `||Δe|| ∝ intensity`
-3. 계산: `spearman(intensity, ||Δe||)`
+3. **학습:**
+   - **Loss:** $\mathcal{L} = \text{MSE}(\hat{P}, P)$ (파라미터 회귀)
+   - **Optimizer:** AdamW
+   - **데이터:** 원본 오디오 × 랜덤 DSP 조합
+   - **Validation:** 예측 파라미터로 증강 후 스펙트로그램 비교
 
 **출력:**
-- `outputs/retrieval_results.json`
-  - 이펙트별, 강도별 MRR/Recall@K
-- `outputs/permutation_test_results.json`
-  - p-value, 유의성 판정
-- `outputs/spearman_results.json`
-  - 강도-MRR 상관계수
-- `outputs/norm_analysis.json`
-  - 강도-노름 상관계수
-- `outputs/retrieval_by_effect.png` - 이펙트별 검색 성능 그래프
-- **의미:** 발견된 대응이 통계적으로 유의미한지 검증
+- `outputs/decoder_model.pt` - 학습된 Decoder 모델
+- `outputs/training_log.json` - 학습 로그 (loss, validation metrics)
+- `outputs/parameter_predictions/` - 검증 샘플의 예측 파라미터
+- **의미:** 이미지 이펙트 설명($E_{cond}$)을 받아서 대응하는 오디오 DSP 파라미터를 예측할 수 있는 모델
 
 ---
 
-### 7. `all` - 전체 파이프라인
+### 6. `all` - 전체 파이프라인
 
 **처리 순서:**
 ```
-extract → sensitivity → linearity → fit_alignment → phase1 → phase2
+extract → sensitivity → linearity → phase1 → phase3
 ```
 
 **최종 출력:**
@@ -205,11 +193,15 @@ extract → sensitivity → linearity → fit_alignment → phase1 → phase2
     │
     ├─→ [linearity] → linearity_results.json (Phase 0-b)
     │
-    └─→ [fit_alignment] → cca_alignment.pkl (Phase 2-a)
+    └─→ [phase1] → discovery_matrix, discovery_heatmap (Phase 1: Text Anchor Discovery)
+            ↑
+            └── CLIP/CLAP 텍스트 임베딩 사용
             ↓
-            ├─→ [phase1] → prototypes, similarity_matrix, heatmap (Phase 3-a)
-            │
-            └─→ [phase2] → retrieval, permutation, spearman, norm (Phase 3-b)
+        [phase3] → decoder_model.pt (Phase 3: Learning - The Decoder)
+            ↑
+            ├── discovery_matrix (대응 관계)
+            ├── 원본 오디오 (data/audio/)
+            └── 랜덤 DSP 증강
 ```
 
 ---
@@ -224,10 +216,18 @@ extract → sensitivity → linearity → fit_alignment → phase1 → phase2
 ### 임베딩 차원
 - **CLIP (이미지):** 768-dim
 - **CLAP (오디오):** 512-dim
-- **CCA 정렬 후:** 모두 512-dim
+- **텍스트 임베딩:** CLIP 768-dim (이미지), CLAP 512-dim (오디오)
 
 ### 주요 Thresholds
 - **Sensitivity:** `min_distance = 0.01`
 - **Linearity:** `min_cosine = 0.8`, `max_cv = 0.3`
 - **Cross-category:** `max_variance = 0.05`
-- **Retrieval:** `n_permutations = 1000`, `p_threshold = 0.05`
+- **Discovery:** 3-way similarity 기반 (multiplication)
+
+### Phase 3 하이퍼파라미터 (예시)
+- **Batch size:** 32
+- **Learning rate:** 1e-4
+- **Optimizer:** AdamW
+- **Loss:** MSE (parameter regression)
+- **Epochs:** 100
+- **Validation split:** 20%

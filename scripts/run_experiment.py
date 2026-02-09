@@ -1,16 +1,16 @@
 #!/usr/bin/env python
 """
-Delta Correspondence Experiment Runner (Phase 0-2)
+Delta Correspondence Experiment Runner (Phase 0-3)
 
-Complete pipeline using CLIP+CLAP with CCA alignment.
+Complete pipeline using CLIP+CLAP with Text Anchor Ensemble and Decoder Learning.
 
 Commands:
   extract         - Extract deltas using CLIP+CLAP
   sensitivity     - Phase 0-a: Sensitivity check
   linearity       - Phase 0-b: Linearity/consistency check
-  fit_alignment   - Phase 2-a: Fit CCA on original embeddings
-  phase1          - Phase 3-a: Discovery (prototype similarity heatmap)
-  phase2          - Phase 3-b: Statistical validation (retrieval, permutation, Spearman, norm)
+  fit_alignment   - Fit CCA on original embeddings (legacy, not used in main pipeline)
+  phase1          - Phase 1: Discovery (Text Anchor Ensemble with 3-way similarity)
+  phase3          - Phase 3: Learning (Train DSP parameter decoder)
   all             - Run full pipeline
 
 Usage:
@@ -38,8 +38,8 @@ import matplotlib.pyplot as plt
 
 sys.path.append(str(Path(__file__).parent.parent))
 
-# Model imports
-from src.models import CLIPEmbedder, CLAPEmbedder, MultimodalEmbedder, CCAAlignment
+# Model imports (CLAP import delayed to avoid argparse conflict)
+from src.models import CLIPEmbedder, MultimodalEmbedder, CCAAlignment
 
 # Experiment imports
 from src.experiment.delta_extraction import DeltaExtractor, DeltaDataset
@@ -50,14 +50,9 @@ from src.experiment.linearity import (
     print_linearity_report,
     get_inconsistent_effects,
 )
-from src.experiment.prototype import compute_prototypes, compute_similarity_matrix, compute_effect_type_similarity
-from src.experiment.retrieval import DeltaRetrieval
-from src.experiment.statistics import (
-    retrieval_permutation_test,
-    norm_monotonicity_analysis,
-    spearman_intensity_correlation,
-    norm_intensity_analysis,
-)
+from src.experiment.discovery import run_discovery
+from src.experiment.phase3_dataset import load_phase3_dataset
+from src.experiment.phase3_training import run_phase3_training
 
 
 # =============================================================================
@@ -162,6 +157,17 @@ def load_embedders(config: dict) -> MultimodalEmbedder:
     Returns:
         MultimodalEmbedder instance
     """
+    # Import CLAP here to avoid argparse conflict
+    # Save sys.argv and temporarily replace it to prevent CLAP's argparse from interfering
+    import sys as _sys
+    _saved_argv = _sys.argv[:]
+    _sys.argv = [_sys.argv[0]]  # Keep only script name
+
+    try:
+        from src.models import CLAPEmbedder
+    finally:
+        _sys.argv = _saved_argv  # Restore original argv
+
     device = config.get('device', 'cpu')
     print(f"\nInitializing embedders on {device}...")
 
@@ -390,7 +396,7 @@ def run_linearity(config: dict):
         results_all.extend(results)
 
         print("Checking cross-category variance...")
-        variance = cross_category_variance_check(results, variance_threshold=variance_threshold)
+        variance = cross_category_variance_check(image_dataset, cosine_threshold=cosine_threshold)
         variance_all.extend(variance)
     else:
         print(f"\nWARNING: Image deltas not found at {image_delta_path}")
@@ -407,7 +413,7 @@ def run_linearity(config: dict):
         results_all.extend(results)
 
         print("Checking cross-category variance...")
-        variance = cross_category_variance_check(results, variance_threshold=variance_threshold)
+        variance = cross_category_variance_check(audio_dataset, cosine_threshold=cosine_threshold)
         variance_all.extend(variance)
     else:
         print(f"\nWARNING: Audio deltas not found at {audio_delta_path}")
@@ -547,14 +553,10 @@ def fit_alignment(config: dict):
 # =============================================================================
 
 def run_phase1(config: dict):
-    """Phase 3-a: Discovery (prototype similarity heatmap)."""
-    print("\n" + "="*80)
-    print("  PHASE 3-a: DISCOVERY (Prototype Similarity)")
-    print("="*80)
-
+    """Phase 1: Discovery (Text Anchor Ensemble)."""
     output_dir = Path(config['output']['dir'])
 
-    # Load deltas
+    # Check delta files exist
     image_delta_path = output_dir / 'image_deltas.json'
     audio_delta_path = output_dir / 'audio_deltas.json'
 
@@ -562,276 +564,88 @@ def run_phase1(config: dict):
         print("ERROR: Delta files not found. Run 'extract' first.")
         return
 
-    print(f"\nLoading delta datasets...")
-    image_dataset = DeltaDataset.load(str(image_delta_path))
-    audio_dataset = DeltaDataset.load(str(audio_delta_path))
-    print(f"  Image deltas: {len(image_dataset.deltas)}")
-    print(f"  Audio deltas: {len(audio_dataset.deltas)}")
+    # Load embedders (needed for text embedding)
+    print("\nLoading embedders for text anchor generation...")
+    device = config['device']
+    embedder = load_embedders(config)
 
-    # Load CCA alignment
-    alignment_path = output_dir / 'cca_alignment.pkl'
-    if not alignment_path.exists():
-        print(f"ERROR: CCA alignment not found at {alignment_path}. Run 'fit_alignment' first.")
-        return
+    # Get categories/genres from config
+    image_categories = config['data'].get('categories', {}).get('image')
+    audio_genres = config['data'].get('categories', {}).get('audio')
 
-    print(f"\nLoading CCA alignment from {alignment_path}...")
-    with open(alignment_path, 'rb') as f:
-        alignment = pickle.load(f)
-
-    # Compute prototypes
-    print("\nComputing prototypes...")
-    image_prototypes = compute_prototypes(image_dataset, normalize_deltas=True)
-    audio_prototypes = compute_prototypes(audio_dataset, normalize_deltas=True)
-    print(f"  Image prototypes: {len(image_prototypes.prototypes)}")
-    print(f"  Audio prototypes: {len(audio_prototypes.prototypes)}")
-
-    # Compute effect-type similarity matrix
-    print("\nComputing effect-type similarity matrix...")
-    sim_matrix, img_effects, aud_effects = compute_effect_type_similarity(
-        image_prototypes,
-        audio_prototypes,
-        alignment,
-        aggregate="mean",
+    # Run discovery
+    run_discovery(
+        image_deltas_path=str(image_delta_path),
+        audio_deltas_path=str(audio_delta_path),
+        embedder=embedder,
+        output_dir=str(output_dir),
+        image_categories=image_categories,
+        audio_genres=audio_genres,
     )
 
-    print(f"\nSimilarity matrix ({len(img_effects)} x {len(aud_effects)}):")
-    print(f"  Image effects: {img_effects}")
-    print(f"  Audio effects: {aud_effects}")
-    print(f"\nMatrix:\n{sim_matrix}")
-
-    # Save results
-    results = {
-        'similarity_matrix': sim_matrix.tolist(),
-        'image_effects': img_effects,
-        'audio_effects': aud_effects,
-    }
-
-    save_path = output_dir / 'phase1_results.json'
-    with open(save_path, 'w') as f:
-        json.dump(results, f, indent=2)
-    print(f"\nResults saved to {save_path}")
-
-    # Plot heatmap
-    if config['output'].get('save_plots', True):
-        print("\nGenerating heatmap...")
-        fig, ax = plt.subplots(figsize=(10, 8))
-        im = ax.imshow(sim_matrix, cmap='RdYlBu_r', vmin=-1, vmax=1)
-
-        ax.set_xticks(range(len(aud_effects)))
-        ax.set_yticks(range(len(img_effects)))
-        ax.set_xticklabels(aud_effects, rotation=45, ha='right')
-        ax.set_yticklabels(img_effects)
-
-        ax.set_xlabel('Audio Effects', fontsize=12)
-        ax.set_ylabel('Image Effects', fontsize=12)
-        ax.set_title('Prototype Similarity Matrix (Image ↔ Audio)', fontsize=14)
-
-        plt.colorbar(im, ax=ax, label='Cosine Similarity')
-
-        # Add values
-        for i in range(len(img_effects)):
-            for j in range(len(aud_effects)):
-                text = ax.text(j, i, f'{sim_matrix[i, j]:.2f}',
-                             ha='center', va='center', fontsize=10,
-                             color='white' if abs(sim_matrix[i, j]) > 0.5 else 'black')
-
-        plt.tight_layout()
-
-        plot_path = output_dir / 'phase1_heatmap.png'
-        plt.savefig(plot_path, dpi=150, bbox_inches='tight')
-        print(f"Heatmap saved to {plot_path}")
-        plt.close()
-
-    # Identify strong candidate pairs
-    print("\n" + "-"*80)
-    print("  STRONG CANDIDATE PAIRS (|sim| > 0.3):")
-    print("-"*80)
-    candidates = []
-    for i, img_e in enumerate(img_effects):
-        for j, aud_e in enumerate(aud_effects):
-            if abs(sim_matrix[i, j]) > 0.3:
-                candidates.append((img_e, aud_e, sim_matrix[i, j]))
-                print(f"  {img_e} <-> {aud_e}: {sim_matrix[i, j]:.3f}")
-
-    if not candidates:
-        print("  (None found)")
-
 
 # =============================================================================
-# COMMAND: PHASE2
+# COMMAND: PHASE3
 # =============================================================================
 
-def run_phase2(config: dict):
-    """Phase 3-b: Statistical validation (retrieval, permutation, Spearman, norm)."""
-    print("\n" + "="*80)
-    print("  PHASE 3-b: STATISTICAL VALIDATION")
-    print("="*80)
-
+def run_phase3(config: dict):
+    """Phase 3: Learning (The Decoder)."""
     output_dir = Path(config['output']['dir'])
 
-    # Load deltas
-    image_delta_path = output_dir / 'image_deltas.json'
-    audio_delta_path = output_dir / 'audio_deltas.json'
+    # Check discovery results exist
+    discovery_matrix_path = output_dir / 'discovery_matrix.npy'
+    discovery_labels_path = output_dir / 'discovery_labels.json'
 
-    if not image_delta_path.exists() or not audio_delta_path.exists():
-        print("ERROR: Delta files not found. Run 'extract' first.")
+    if not discovery_matrix_path.exists() or not discovery_labels_path.exists():
+        print("ERROR: Discovery results not found. Run 'phase1' first.")
         return
 
-    print(f"\nLoading delta datasets...")
-    image_dataset = DeltaDataset.load(str(image_delta_path))
-    audio_dataset = DeltaDataset.load(str(audio_delta_path))
-    print(f"  Image deltas: {len(image_dataset.deltas)}")
-    print(f"  Audio deltas: {len(audio_dataset.deltas)}")
+    # Get phase3 config
+    phase3_config = config.get('phase3', {})
+    batch_size = phase3_config.get('batch_size', 32)
+    num_epochs = phase3_config.get('num_epochs', 100)
+    learning_rate = phase3_config.get('learning_rate', 1e-4)
+    val_split = phase3_config.get('val_split', 0.2)
+    audio_duration = phase3_config.get('audio_duration', 10.0)
+    max_files = phase3_config.get('max_audio_files', None)
 
-    # Load CCA alignment
-    alignment_path = output_dir / 'cca_alignment.pkl'
-    if not alignment_path.exists():
-        print(f"ERROR: CCA alignment not found. Run 'fit_alignment' first.")
-        return
+    # Audio directory
+    audio_dir = Path(config['data']['root_dir']) / config['data']['audio_subdir']
 
-    print(f"\nLoading CCA alignment...")
-    with open(alignment_path, 'rb') as f:
-        alignment = pickle.load(f)
-
-    # Get effect mapping
-    effect_mapping = config.get('effect_mapping', {})
-    print(f"\nEffect mapping (hypothesis): {effect_mapping}")
-
-    # Initialize retrieval
-    print("\nInitializing retrieval system...")
-    retrieval = DeltaRetrieval(
-        image_dataset,
-        audio_dataset,
-        effect_mapping,
-        alignment=alignment,
+    # Load dataset
+    print("\nLoading Phase 3 dataset...")
+    dataset = load_phase3_dataset(
+        audio_dir=str(audio_dir),
+        discovery_matrix_path=str(discovery_matrix_path),
+        discovery_labels_path=str(discovery_labels_path),
+        sample_rate=config['model']['clap']['sample_rate'],
+        duration=audio_duration,
+        max_files=max_files,
     )
 
-    # === Retrieval Metrics ===
-    print("\n" + "-"*80)
-    print("  RETRIEVAL METRICS")
-    print("-"*80)
+    # Load CLAP embedder
+    print("\nLoading CLAP embedder...")
+    from src.models.clap_embedder import CLAPEmbedder
+    device = config['device']
 
-    metrics = retrieval.evaluate(k_values=[1, 3, 5, 10])
-    print(f"\nTotal queries: {metrics.total_queries}")
-    print(f"Mean Reciprocal Rank (MRR): {metrics.mean_reciprocal_rank:.4f}")
-    print(f"Mean Rank: {metrics.mean_rank:.2f}")
-    for k, acc in metrics.top_k_accuracy.items():
-        print(f"Top-{k} Accuracy: {acc:.4f}")
-
-    # Metrics by intensity
-    print("\n--- By Intensity ---")
-    by_intensity = retrieval.evaluate_by_intensity()
-    for intensity, m in by_intensity.items():
-        print(f"\n{intensity.upper()}:")
-        print(f"  MRR: {m.mean_reciprocal_rank:.4f}")
-        print(f"  Top-5 Accuracy: {m.top_k_accuracy.get(5, 0):.4f}")
-
-    # === Permutation Test ===
-    print("\n" + "-"*80)
-    print("  PERMUTATION TEST")
-    print("-"*80)
-
-    n_permutations = config.get('n_permutations', 1000)
-    print(f"\nRunning permutation test ({n_permutations} permutations)...")
-
-    perm_result = retrieval_permutation_test(
-        image_dataset,
-        audio_dataset,
-        effect_mapping,
-        metric="mrr",
-        n_permutations=n_permutations,
-        alignment=alignment,
+    clap_embedder = CLAPEmbedder(
+        model_id=config['model']['clap']['model_id'],
+        enable_fusion=config['model']['clap']['enable_fusion'],
+        max_duration=config['model']['clap']['max_duration'],
+        device=device,
     )
 
-    print(f"\nObserved MRR: {perm_result.observed_statistic:.4f}")
-    print(f"Null mean: {np.mean(perm_result.null_distribution):.4f}")
-    print(f"Null std: {np.std(perm_result.null_distribution):.4f}")
-    print(f"p-value: {perm_result.p_value:.4f}")
-    print(f"Effect size (Cohen's d): {perm_result.effect_size:.2f}")
-
-    if perm_result.p_value < 0.05:
-        print("  ✓ Result is statistically significant (p < 0.05)")
-    else:
-        print("  ✗ Result is NOT statistically significant (p >= 0.05)")
-
-    # === Norm Monotonicity ===
-    print("\n" + "-"*80)
-    print("  NORM MONOTONICITY ANALYSIS")
-    print("-"*80)
-
-    for modality, dataset in [("image", image_dataset), ("audio", audio_dataset)]:
-        print(f"\n{modality.upper()} effects:")
-        mono_results = norm_monotonicity_analysis(dataset, modality)
-
-        for effect, result in mono_results.items():
-            status = "✓" if result.is_monotonic else "✗"
-            print(f"  {effect}: ρ={result.spearman_rho:.3f}, p={result.spearman_p_value:.3f} {status}")
-            print(f"    Norms by intensity: {result.intensity_to_norm}")
-
-    # === Spearman Correlation (intensity vs norm) ===
-    print("\n" + "-"*80)
-    print("  SPEARMAN CORRELATION (Intensity vs Norm)")
-    print("-"*80)
-
-    for modality, dataset in [("image", image_dataset), ("audio", audio_dataset)]:
-        print(f"\n{modality.upper()}:")
-        spearman_results = spearman_intensity_correlation(dataset)
-
-        for effect_type, (rho, p_value) in spearman_results.items():
-            status = "✓ Sig" if p_value < 0.05 else "✗ NS"
-            print(f"  {effect_type}: ρ={rho:.3f}, p={p_value:.3f} {status}")
-
-    # === Norm-Intensity Analysis ===
-    print("\n" + "-"*80)
-    print("  NORM-INTENSITY ANALYSIS")
-    print("-"*80)
-
-    for modality, dataset in [("image", image_dataset), ("audio", audio_dataset)]:
-        print(f"\n{modality.upper()}:")
-        norm_analysis = norm_intensity_analysis(dataset)
-
-        for effect_type, stats in norm_analysis.items():
-            print(f"\n  {effect_type}:")
-            for intensity, (mean, std) in stats.items():
-                print(f"    {intensity}: {mean:.4f} ± {std:.4f}")
-
-    # === Save Results ===
-    print("\n" + "-"*80)
-    print("  SAVING RESULTS")
-    print("-"*80)
-
-    results = {
-        'retrieval_metrics': {
-            'mrr': metrics.mean_reciprocal_rank,
-            'mean_rank': metrics.mean_rank,
-            'top_k_accuracy': metrics.top_k_accuracy,
-            'total_queries': metrics.total_queries,
-        },
-        'retrieval_by_intensity': {
-            intensity: {
-                'mrr': m.mean_reciprocal_rank,
-                'top_k_accuracy': m.top_k_accuracy,
-            }
-            for intensity, m in by_intensity.items()
-        },
-        'permutation_test': {
-            'observed_mrr': perm_result.observed_statistic,
-            'null_mean': float(np.mean(perm_result.null_distribution)),
-            'null_std': float(np.std(perm_result.null_distribution)),
-            'p_value': perm_result.p_value,
-            'effect_size': perm_result.effect_size,
-            'n_permutations': n_permutations,
-        },
-    }
-
-    save_path = output_dir / 'phase2_results.json'
-    with open(save_path, 'w') as f:
-        json.dump(results, f, indent=2)
-    print(f"\nResults saved to {save_path}")
-
-    print("\n" + "="*80)
-    print("  Phase 2 complete!")
-    print("="*80)
+    # Run training
+    run_phase3_training(
+        dataset=dataset,
+        embedder=clap_embedder,
+        output_dir=str(output_dir / 'phase3'),
+        batch_size=batch_size,
+        num_epochs=num_epochs,
+        learning_rate=learning_rate,
+        val_split=val_split,
+        device=device,
+    )
 
 
 # =============================================================================
@@ -841,15 +655,14 @@ def run_phase2(config: dict):
 def run_all(config: dict):
     """Run full pipeline."""
     print("\n" + "="*80)
-    print("  RUNNING FULL PIPELINE (Phase 0-2)")
+    print("  RUNNING FULL PIPELINE (Phase 0-3)")
     print("="*80)
 
     extract_deltas(config)
     run_sensitivity(config)
     run_linearity(config)
-    fit_alignment(config)
     run_phase1(config)
-    run_phase2(config)
+    run_phase3(config)
 
     print("\n" + "="*80)
     print("  FULL PIPELINE COMPLETE!")
@@ -862,14 +675,14 @@ def run_all(config: dict):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Delta Correspondence Experiment (Phase 0-2)",
+        description="Delta Correspondence Experiment (Phase 0-3)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
 
     parser.add_argument(
         'command',
-        choices=['extract', 'sensitivity', 'linearity', 'fit_alignment', 'phase1', 'phase2', 'all'],
+        choices=['extract', 'sensitivity', 'linearity', 'fit_alignment', 'phase1', 'phase3', 'all'],
         help="Command to run",
     )
 
@@ -904,8 +717,8 @@ def main():
             fit_alignment(config)
         elif args.command == 'phase1':
             run_phase1(config)
-        elif args.command == 'phase2':
-            run_phase2(config)
+        elif args.command == 'phase3':
+            run_phase3(config)
         elif args.command == 'all':
             run_all(config)
     except KeyboardInterrupt:

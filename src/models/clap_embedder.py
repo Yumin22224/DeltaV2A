@@ -189,6 +189,25 @@ class CLAPEmbedder(nn.Module):
 
         return embeddings
 
+    @torch.no_grad()
+    def embed_text(self, texts: List[str]) -> torch.Tensor:
+        """
+        Extract text embeddings.
+
+        Args:
+            texts: List of text strings
+
+        Returns:
+            embeddings: (B, 512) tensor
+        """
+        # Extract embeddings (returns numpy array)
+        embeddings_np = self.model.get_text_embedding(texts)
+
+        # Convert to torch tensor
+        embeddings = torch.from_numpy(embeddings_np).float()
+
+        return embeddings
+
     @property
     def embedding_dim(self) -> int:
         """Return embedding dimension."""

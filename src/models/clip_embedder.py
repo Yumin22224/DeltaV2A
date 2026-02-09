@@ -51,6 +51,9 @@ class CLIPEmbedder(nn.Module):
             )
             self.model.eval()
 
+            # Load tokenizer for text embeddings
+            self.tokenizer = open_clip.get_tokenizer(self.model_name)
+
             print(f"Loaded CLIP {self.model_name} ({self.pretrained}) successfully")
 
         except ImportError as e:
@@ -138,6 +141,25 @@ class CLIPEmbedder(nn.Module):
         """
         images = [self.preprocess(img) for img in pil_images]
         return torch.stack(images)
+
+    @torch.no_grad()
+    def embed_text(self, texts: List[str]) -> torch.Tensor:
+        """
+        Extract text embeddings.
+
+        Args:
+            texts: List of text strings
+
+        Returns:
+            embeddings: (B, 768) tensor
+        """
+        # Tokenize texts
+        text_tokens = self.tokenizer(texts).to(self.device)
+
+        # Extract embeddings
+        embeddings = self.model.encode_text(text_tokens)
+
+        return embeddings
 
     @property
     def embedding_dim(self) -> int:

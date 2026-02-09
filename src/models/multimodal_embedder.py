@@ -83,6 +83,30 @@ class MultimodalEmbedder:
         """
         return self.clap.embed_audio(waveform, sample_rate)
 
+    def embed_image_text(self, texts: List[str]) -> torch.Tensor:
+        """
+        Extract image-domain text embeddings using CLIP.
+
+        Args:
+            texts: List of text strings
+
+        Returns:
+            embeddings: (B, 768) tensor
+        """
+        return self.clip.embed_text(texts)
+
+    def embed_audio_text(self, texts: List[str]) -> torch.Tensor:
+        """
+        Extract audio-domain text embeddings using CLAP.
+
+        Args:
+            texts: List of text strings
+
+        Returns:
+            embeddings: (B, 512) tensor
+        """
+        return self.clap.embed_text(texts)
+
     @property
     def image_dim(self) -> int:
         """Image embedding dimension (768)."""

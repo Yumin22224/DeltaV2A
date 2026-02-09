@@ -14,7 +14,7 @@ data:
   # For images: folder names under images/
   # For audio: uses filename patterns or treats all as single category
   categories:
-    image: ["ocean"]  # null = all categories, or list like ["ocean", "mountain_snowy", "desert_sand"]
+    image: ["ocean", "cliff", "volcano"]  # null = all categories, or list like ["ocean", "mountain_snowy", "desert_sand"]
     audio: null  # null = all audio files
 
   # Save augmented files (images/audio with effects applied)
@@ -76,6 +76,15 @@ effect_mapping:
 
 # Statistical analysis
 n_permutations: 10000
+
+# Phase 3: Learning (The Decoder)
+phase3:
+  batch_size: 32
+  num_epochs: 100
+  learning_rate: 1e-4
+  val_split: 0.2
+  audio_duration: 10.0  # seconds
+  max_audio_files: null  # null = use all files
 
 # Output
 output:

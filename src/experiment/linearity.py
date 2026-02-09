@@ -173,52 +173,96 @@ def linearity_analysis(
 
 
 def cross_category_variance_check(
-    results: List[LinearityResult],
-    variance_threshold: float = 0.05,
+    delta_dataset: DeltaDataset,
+    cosine_threshold: float = 0.8,
 ) -> List[CrossCategoryVariance]:
     """
-    Check variance of delta consistency across categories.
+    Check if effects produce consistent delta directions across categories.
 
-    High variance → context-dependent (violates linearity).
+    Context invariance: Same effect should produce similar delta directions
+    regardless of source category.
+
+    Method:
+    1. For each (modality, effect, intensity):
+       - Compute prototype vector for each category: p_c = mean(normalized deltas)
+       - Compute pairwise cosine similarity between category prototypes
+       - High similarity → context-invariant (✓)
 
     Args:
-        results: List of LinearityResult from linearity_analysis()
-        variance_threshold: Maximum variance for context invariance
+        delta_dataset: Dataset of extracted deltas
+        cosine_threshold: Minimum cosine similarity for context invariance (default: 0.8)
 
     Returns:
         List of CrossCategoryVariance for each (modality, effect, intensity)
     """
     variance_results = []
 
-    # Group by (modality, effect_type, intensity)
-    groups: Dict[Tuple[str, str, str], List[LinearityResult]] = {}
+    # Group deltas by (modality, effect_type, intensity, category)
+    groups: Dict[Tuple[str, str, str, str], List] = {}
 
-    for r in results:
-        key = (r.modality, r.effect_type, r.intensity)
+    for delta in delta_dataset.deltas:
+        key = (delta.modality, delta.effect_type, delta.intensity, delta.category)
         if key not in groups:
             groups[key] = []
-        groups[key].append(r)
+        groups[key].append(delta.delta)
 
-    # Compute variance for each group
-    for (modality, effect_type, intensity), category_results in groups.items():
-        if len(category_results) < 2:
+    # Group by (modality, effect_type, intensity) to compare across categories
+    effect_groups: Dict[Tuple[str, str, str], Dict[str, np.ndarray]] = {}
+
+    for (modality, effect_type, intensity, category), deltas in groups.items():
+        effect_key = (modality, effect_type, intensity)
+        if effect_key not in effect_groups:
+            effect_groups[effect_key] = {}
+
+        # Compute prototype: mean of normalized deltas for this category
+        deltas_array = np.stack(deltas)  # (N, D)
+        norms = np.linalg.norm(deltas_array, axis=1, keepdims=True)
+        norms = np.where(norms > 0, norms, 1.0)
+        normalized = deltas_array / norms
+        prototype = np.mean(normalized, axis=0)  # (D,)
+
+        effect_groups[effect_key][category] = prototype
+
+    # Compute cross-category similarity for each effect
+    for (modality, effect_type, intensity), category_prototypes in effect_groups.items():
+        if len(category_prototypes) < 2:
+            # Need at least 2 categories to compare
             continue
 
-        # Get mean_pairwise_cosine for each category
-        cosines = [r.mean_pairwise_cosine for r in category_results]
-        categories = [r.category for r in category_results]
+        categories = list(category_prototypes.keys())
+        prototypes = [category_prototypes[c] for c in categories]
 
-        variance = float(np.var(cosines))
-        mean = float(np.mean(cosines))
+        # Compute pairwise cosine similarity between category prototypes
+        similarities = []
+        for i in range(len(prototypes)):
+            for j in range(i + 1, len(prototypes)):
+                p1 = prototypes[i]
+                p2 = prototypes[j]
 
-        is_invariant = variance < variance_threshold
+                # Normalize
+                p1_norm = np.linalg.norm(p1)
+                p2_norm = np.linalg.norm(p2)
+
+                if p1_norm > 0 and p2_norm > 0:
+                    cosine = np.dot(p1, p2) / (p1_norm * p2_norm)
+                    similarities.append(float(cosine))
+
+        if len(similarities) == 0:
+            continue
+
+        # Statistics
+        mean_similarity = float(np.mean(similarities))
+        variance_similarity = float(np.var(similarities))
+
+        # Context-invariant if mean similarity is high
+        is_invariant = mean_similarity >= cosine_threshold
 
         variance_results.append(CrossCategoryVariance(
             modality=modality,
             effect_type=effect_type,
             intensity=intensity,
-            variance_cosine=variance,
-            mean_cosine=mean,
+            variance_cosine=variance_similarity,
+            mean_cosine=mean_similarity,
             categories=categories,
             is_context_invariant=is_invariant,
         ))
@@ -275,8 +319,14 @@ def print_linearity_report(
 
     print("\n" + "-" * 100)
     print(f"  Total effect configurations: {total_configs}")
-    print(f"  Context-invariant: {invariant} ({invariant/total_configs*100:.1f}%)")
-    print(f"  Context-dependent: {total_configs-invariant} ({(total_configs-invariant)/total_configs*100:.1f}%)")
+
+    if total_configs > 0:
+        print(f"  Context-invariant: {invariant} ({invariant/total_configs*100:.1f}%)")
+        print(f"  Context-dependent: {total_configs-invariant} ({(total_configs-invariant)/total_configs*100:.1f}%)")
+    else:
+        print("  ⚠️  Cross-category variance cannot be computed (need at least 2 categories per modality)")
+        print("     Single-category data detected. Consider adding more categories for full validation.")
+
     print("=" * 100)
 
 
