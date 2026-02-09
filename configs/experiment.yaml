@@ -9,6 +9,18 @@ data:
   max_images: 1000
   max_audio: 1000
 
+  # Category filtering (optional)
+  # If specified, only these categories will be processed
+  # For images: folder names under images/
+  # For audio: uses filename patterns or treats all as single category
+  categories:
+    image: ["ocean"]  # null = all categories, or list like ["ocean", "mountain_snowy", "desert_sand"]
+    audio: null  # null = all audio files
+
+  # Save augmented files (images/audio with effects applied)
+  save_augmented: true  # Set to true to save augmented data
+  augmented_dir: "outputs/augmented"  # Where to save augmented files
+
 # Model configuration
 model:
   # Primary embedders
@@ -21,7 +33,7 @@ model:
     model_id: 1  # 630k+audioset non-fusion (music)
     enable_fusion: false
     embed_dim: 512
-    sample_rate: 48000
+    sample_rate: 48000  # CLAP fixed at 48kHz (informational only)
     max_duration: 20.0  # seconds (truncate/pad for batch processing)
 
   # Cross-modal alignment

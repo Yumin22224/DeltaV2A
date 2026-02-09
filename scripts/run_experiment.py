@@ -76,6 +76,10 @@ def get_data_paths(config: dict) -> Tuple[List[str], List[str]]:
     """
     Get image and audio paths from data directory.
 
+    Supports category filtering:
+    - Image categories: folder names under images/
+    - Audio categories: currently treats all as single category
+
     Returns:
         image_paths: List of image file paths
         audio_paths: List of audio file paths
@@ -84,22 +88,56 @@ def get_data_paths(config: dict) -> Tuple[List[str], List[str]]:
     image_dir = data_dir / config['data']['image_subdir']
     audio_dir = data_dir / config['data']['audio_subdir']
 
+    # Get category filters
+    categories_config = config['data'].get('categories', {})
+    image_categories = categories_config.get('image', None) if categories_config else None
+    audio_categories = categories_config.get('audio', None) if categories_config else None
+
     # Get image paths
     image_extensions = ['.jpg', '.jpeg', '.png', '.webp']
     image_paths = []
     if image_dir.exists():
-        for ext in image_extensions:
-            image_paths.extend(image_dir.glob(f'*{ext}'))
-            image_paths.extend(image_dir.glob(f'**/*{ext}'))
+        if image_categories is not None and len(image_categories) > 0:
+            # Filter by specific categories (folders)
+            print(f"  Filtering images by categories: {image_categories}")
+            for category in image_categories:
+                category_dir = image_dir / category
+                if category_dir.exists() and category_dir.is_dir():
+                    for ext in image_extensions:
+                        image_paths.extend(category_dir.glob(f'*{ext}'))
+                else:
+                    print(f"    WARNING: Category '{category}' not found in {image_dir}")
+        else:
+            # Get all images
+            for ext in image_extensions:
+                image_paths.extend(image_dir.glob(f'*{ext}'))
+                image_paths.extend(image_dir.glob(f'**/*{ext}'))
     image_paths = [str(p) for p in sorted(set(image_paths))]
 
     # Get audio paths
     audio_extensions = ['.wav', '.mp3', '.flac', '.ogg', '.m4a']
     audio_paths = []
     if audio_dir.exists():
-        for ext in audio_extensions:
-            audio_paths.extend(audio_dir.glob(f'*{ext}'))
-            audio_paths.extend(audio_dir.glob(f'**/*{ext}'))
+        if audio_categories is not None and len(audio_categories) > 0:
+            # Filter by specific categories (folders if exist, or filename patterns)
+            print(f"  Filtering audio by categories: {audio_categories}")
+            for category in audio_categories:
+                category_dir = audio_dir / category
+                if category_dir.exists() and category_dir.is_dir():
+                    # Category is a folder
+                    for ext in audio_extensions:
+                        audio_paths.extend(category_dir.glob(f'*{ext}'))
+                else:
+                    # Try filename pattern matching
+                    for ext in audio_extensions:
+                        for path in audio_dir.glob(f'*{ext}'):
+                            if category.lower() in path.name.lower():
+                                audio_paths.append(path)
+        else:
+            # Get all audio files
+            for ext in audio_extensions:
+                audio_paths.extend(audio_dir.glob(f'*{ext}'))
+                audio_paths.extend(audio_dir.glob(f'**/*{ext}'))
     audio_paths = [str(p) for p in sorted(set(audio_paths))]
 
     # Apply limits if specified
@@ -138,11 +176,11 @@ def load_embedders(config: dict) -> MultimodalEmbedder:
 
     # Initialize CLAP
     clap_config = config['model']['clap']
-    print(f"  Loading CLAP (model_id={clap_config['model_id']}, sample_rate={clap_config['sample_rate']}Hz)...")
+    print(f"  Loading CLAP (model_id={clap_config['model_id']}, sample_rate=48000Hz, max_duration={clap_config['max_duration']}s)...")
     clap_embedder = CLAPEmbedder(
         model_id=clap_config['model_id'],
         enable_fusion=clap_config['enable_fusion'],
-        sample_rate=clap_config['sample_rate'],
+        max_duration=clap_config['max_duration'],
         device=device,
     )
 
@@ -187,16 +225,28 @@ def extract_deltas(config: dict):
     output_dir = Path(config['output']['dir'])
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Check if augmented files should be saved
+    save_augmented = config['data'].get('save_augmented', False)
+    augmented_dir = config['data'].get('augmented_dir', 'outputs/augmented') if save_augmented else None
+
+    if save_augmented:
+        print(f"\n⚠️  Augmented files will be saved to: {augmented_dir}")
+        Path(augmented_dir).mkdir(parents=True, exist_ok=True)
+
     # Extract image deltas
     if image_paths:
         print(f"\nExtracting image deltas...")
         print(f"  Effects: {config['effects']['image']['types']}")
         print(f"  Intensities: {config['effects']['intensities']}")
+        if save_augmented:
+            print(f"  Saving augmented images to: {augmented_dir}/images/")
 
         image_dataset = extractor.extract_image_deltas(
             image_paths,
             effect_types=config['effects']['image']['types'],
             intensities=config['effects']['intensities'],
+            save_augmented=save_augmented,
+            augmented_dir=augmented_dir,
         )
 
         image_save_path = output_dir / 'image_deltas.json'
@@ -208,11 +258,16 @@ def extract_deltas(config: dict):
         print(f"\nExtracting audio deltas...")
         print(f"  Effects: {config['effects']['audio']['types']}")
         print(f"  Intensities: {config['effects']['intensities']}")
+        if save_augmented:
+            print(f"  Saving augmented audio to: {augmented_dir}/audio/")
 
         audio_dataset = extractor.extract_audio_deltas(
             audio_paths,
             effect_types=config['effects']['audio']['types'],
             intensities=config['effects']['intensities'],
+            sample_rate=embedder.audio_sample_rate,  # Use CLAP's sample rate (48000)
+            save_augmented=save_augmented,
+            augmented_dir=augmented_dir,
         )
 
         audio_save_path = output_dir / 'audio_deltas.json'
