@@ -1,0 +1,65 @@
+# DeltaV2A Pipeline Configuration (Phase A-C)
+
+device: "mps"
+
+# === Data ===
+data:
+  audio_dir: "data/experiment/audio"
+  image_dir: "data/experiment/images"
+  max_audio_files: null  # null = use all
+
+# === Models ===
+model:
+  clip:
+    name: "ViT-L-14"
+    pretrained: "openai"
+  clap:
+    model_id: 1
+    enable_fusion: false
+    max_duration: 20.0
+    sample_rate: 48000
+
+# === Phase A-1: Vocabulary ===
+vocab:
+  img_terms: null  # null = use default IMG_VOCAB_TERMS
+  aud_terms: null  # null = use default AUD_VOCAB_TERMS
+
+# === Phase A-2: Correspondence ===
+correspondence:
+  sbert_model: "all-MiniLM-L6-v2"
+
+# === Phase A-3: Inverse Mapping Database ===
+inverse_mapping:
+  augmentations_per_audio: 10
+  temperature: 0.1
+  seed: 42
+
+# === Pedalboard Effects ===
+effects:
+  active:
+    - lowpass
+    - highshelf
+    - distortion
+    - reverb
+
+# === Phase B: Controller Training ===
+controller:
+  hidden_dims: [512, 256, 128]
+  dropout: 0.1
+  batch_size: 64
+  num_epochs: 100
+  learning_rate: 1e-4
+  val_split: 0.2
+
+# === Phase C: Visual Encoder ===
+visual_encoder:
+  projection_dim: 768
+  dropout: 0.1
+
+# === Phase C: Inference ===
+inference:
+  top_k: 5
+
+# === Output ===
+output:
+  dir: "outputs/pipeline"

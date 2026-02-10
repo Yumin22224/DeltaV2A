@@ -4,7 +4,8 @@
       "Bash(python scripts/prepare_places365_landscape.py:*)",
       "Bash(python -m pip:*)",
       "Bash(python -c:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(pip install:*)"
     ]
   }
 }

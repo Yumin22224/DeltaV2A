@@ -3,4 +3,4 @@
 from . import image_effects
 from . import audio_effects
 
-__all__ = ["image_effects", "audio_effects"]
+__all__ = ["image_effects", "audio_effects", "pedalboard_effects"]

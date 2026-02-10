@@ -36,7 +36,7 @@ import yaml
 import numpy as np
 import matplotlib.pyplot as plt
 
-sys.path.append(str(Path(__file__).parent.parent))
+sys.path.append(str(Path(__file__).parent.parent.parent))
 
 # Model imports (CLAP import delayed to avoid argparse conflict)
 from src.models import CLIPEmbedder, MultimodalEmbedder, CCAAlignment

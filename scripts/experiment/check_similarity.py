@@ -34,7 +34,7 @@ from typing import Dict, List, Tuple, Optional
 import numpy as np
 import torch
 
-sys.path.append(str(Path(__file__).parent.parent))
+sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from src.models import CLIPEmbedder, CLAPEmbedder, MultimodalEmbedder, CCAAlignment
 
