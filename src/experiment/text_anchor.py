@@ -10,8 +10,8 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import numpy as np
 import torch
-from typing import Dict, List, Tuple
-from dataclasses import dataclass
+from typing import Dict, List, Tuple, Optional
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -22,6 +22,22 @@ class TextAnchor:
     delta: np.ndarray  # (embed_dim,)
     synonyms_used: List[str]
     templates_used: List[str]
+    # Representative texts for SBERT cross-modal comparison
+    representative_texts: List[str] = field(default_factory=list)
+
+
+# Global SBERT model cache
+_sbert_model = None
+
+
+def _get_sbert_model():
+    """Load SBERT model (cached)."""
+    global _sbert_model
+    if _sbert_model is None:
+        from sentence_transformers import SentenceTransformer
+        _sbert_model = SentenceTransformer('all-MiniLM-L6-v2')
+        print("      Loaded SBERT model (all-MiniLM-L6-v2)")
+    return _sbert_model
 
 
 # Synonym sets for image effects
@@ -133,12 +149,16 @@ def _generate_image_text_anchors(
         # Average over all deltas to get ensemble
         ensemble_delta = np.mean(all_deltas, axis=0)
 
+        # Representative texts for SBERT (synonym descriptions)
+        rep_texts = [f"a {syn} image" for syn in synonyms]
+
         anchors[effect_type] = TextAnchor(
             effect_type=effect_type,
             modality="image",
             delta=ensemble_delta,
             synonyms_used=synonyms,
             templates_used=templates_used,
+            representative_texts=rep_texts,
         )
 
     return anchors
@@ -205,12 +225,16 @@ def _generate_audio_text_anchors(
         # Average over all deltas to get ensemble
         ensemble_delta = np.mean(all_deltas, axis=0)
 
+        # Representative texts for SBERT (synonym descriptions)
+        rep_texts = [f"a {syn} sound" for syn in synonyms]
+
         anchors[effect_type] = TextAnchor(
             effect_type=effect_type,
             modality="audio",
             delta=ensemble_delta,
             synonyms_used=synonyms,
             templates_used=templates_used,
+            representative_texts=rep_texts,
         )
 
     return anchors
@@ -221,19 +245,35 @@ def compute_text_anchor_similarity(
     text_anchor2: TextAnchor,
 ) -> float:
     """
-    Compute cosine similarity between two text anchors.
+    Compute cross-modal text anchor similarity using SBERT.
 
-    For cross-modal similarity: Sim(image text anchor, audio text anchor)
+    Since CLIP (768d) and CLAP (512d) embeddings live in different spaces,
+    we use SBERT to compare the semantic meaning of the text descriptions.
+
+    Method:
+    - Embed representative texts from both anchors with SBERT
+    - Compute mean SBERT embedding for each anchor
+    - Return cosine similarity between the two means
     """
-    delta1 = text_anchor1.delta
-    delta2 = text_anchor2.delta
+    from sentence_transformers import util
 
-    # Normalize
-    norm1 = np.linalg.norm(delta1)
-    norm2 = np.linalg.norm(delta2)
+    sbert = _get_sbert_model()
 
-    if norm1 == 0 or norm2 == 0:
+    texts1 = text_anchor1.representative_texts
+    texts2 = text_anchor2.representative_texts
+
+    if not texts1 or not texts2:
         return 0.0
 
+    # Encode with SBERT
+    emb1 = sbert.encode(texts1, convert_to_tensor=True)  # (N1, sbert_dim)
+    emb2 = sbert.encode(texts2, convert_to_tensor=True)  # (N2, sbert_dim)
+
+    # Mean pooling
+    mean1 = emb1.mean(dim=0)  # (sbert_dim,)
+    mean2 = emb2.mean(dim=0)  # (sbert_dim,)
+
     # Cosine similarity
-    return float(np.dot(delta1, delta2) / (norm1 * norm2))
+    sim = util.cos_sim(mean1.unsqueeze(0), mean2.unsqueeze(0))
+
+    return float(sim.item())

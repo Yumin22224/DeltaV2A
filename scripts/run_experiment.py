@@ -8,7 +8,7 @@ Commands:
   extract         - Extract deltas using CLIP+CLAP
   sensitivity     - Phase 0-a: Sensitivity check
   linearity       - Phase 0-b: Linearity/consistency check
-  fit_alignment   - Fit CCA on original embeddings (legacy, not used in main pipeline)
+  fit_alignment   - Fit CCA on original embeddings
   phase1          - Phase 1: Discovery (Text Anchor Ensemble with 3-way similarity)
   phase3          - Phase 3: Learning (Train DSP parameter decoder)
   all             - Run full pipeline
@@ -23,7 +23,7 @@ Usage:
     python scripts/run_experiment.py linearity --config configs/experiment.yaml
     python scripts/run_experiment.py fit_alignment --config configs/experiment.yaml
     python scripts/run_experiment.py phase1 --config configs/experiment.yaml
-    python scripts/run_experiment.py phase2 --config configs/experiment.yaml
+    python scripts/run_experiment.py phase3 --config configs/experiment.yaml
 """
 
 import argparse

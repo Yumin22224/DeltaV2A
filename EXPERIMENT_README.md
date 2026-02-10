@@ -2,66 +2,85 @@
 
 ## 목표
 
-Image effect (ΔV)와 Audio effect (ΔA) 사이에 semantic correspondence가 존재하는지를 pretrained multimodal embedding 공간에서 검증한다.
+Image effect (ΔV)와 Audio effect (ΔA) 사이에 semantic correspondence가 존재하는지를 pretrained multimodal embedding 공간에서 검증하고, 이를 활용하여 DSP 파라미터를 예측하는 decoder를 학습한다.
 
 ## 프로젝트 구조
 
 ```
 DeltaV2A/
 ├── configs/
-│   └── experiment.yaml          # 실험 설정
+│   └── experiment.yaml              # 실험 설정
 ├── src/
 │   ├── effects/
-│   │   ├── image_effects.py     # 이미지 이펙트 (brightness, contrast, saturation, blur)
-│   │   └── audio_effects.py     # 오디오 이펙트 (lpf, highshelf, saturation, reverb)
+│   │   ├── image_effects.py         # 이미지 이펙트 (brightness, contrast, saturation, blur)
+│   │   └── audio_effects.py         # 오디오 이펙트 (lpf, highshelf, saturation, reverb)
 │   ├── experiment/
-│   │   ├── delta_extraction.py  # Delta 추출 (Δe = e(aug) - e(orig))
-│   │   ├── prototype.py         # Prototype 계산
-│   │   ├── retrieval.py         # Delta-to-delta retrieval
-│   │   └── statistics.py        # 통계 분석 (permutation test, baseline)
+│   │   ├── delta_extraction.py      # Delta 추출 (Δe = e(aug) - e(orig))
+│   │   ├── sensitivity.py           # Phase 0-a: 민감도 검사
+│   │   ├── linearity.py             # Phase 0-b: 선형성/일관성 검사
+│   │   ├── text_anchor.py           # Phase 1: 텍스트 앵커 생성 (SBERT cross-modal)
+│   │   ├── discovery.py             # Phase 1: 3-way 유사도 기반 대응 발견
+│   │   ├── phase3_dataset.py        # Phase 3: 학습 데이터셋
+│   │   ├── phase3_training.py       # Phase 3: Decoder 학습 루프
+│   │   ├── prototype.py             # 프로토타입 계산 (참고용)
+│   │   ├── retrieval.py             # Retrieval 평가 (참고용)
+│   │   └── statistics.py            # 통계 분석 (참고용)
 │   └── models/
-│       └── embedder.py          # ImageBind wrapper
+│       ├── clip_embedder.py         # CLIP (ViT-L/14) 임베딩
+│       ├── clap_embedder.py         # CLAP (630k+audioset) 임베딩
+│       ├── multimodal_embedder.py   # CLIP+CLAP 통합 래퍼
+│       ├── alignment.py             # CCA 정렬
+│       └── decoder.py               # DSP Parameter Decoder (CrossAttention + MLP)
 ├── scripts/
-│   ├── run_experiment.py        # 실험 실행 스크립트
-│   └── download_bandcamp_cc.py  # Bandcamp CC 음악 다운로더
+│   ├── run_experiment.py            # 실험 실행 스크립트
+│   ├── check_similarity.py          # CLIP/CLAP 유사도 검사 도구
+│   ├── prepare_data.py              # 데이터 전처리
+│   ├── download_jamendo.py          # MTG-Jamendo 음악 다운로더
+│   ├── download_bandcamp_cc.py      # Bandcamp CC 음악 다운로더
+│   └── prepare_places365_landscape.py  # Places365 랜드스케이프 이미지 필터
 └── data/
-    └── experiment/              # 실험 데이터 (TODO: 준비 필요)
-        ├── images/              # 랜드스케이프 이미지
-        └── audio/               # 4bar 전자음악 클립
+    └── experiment/
+        ├── images/                  # 랜드스케이프 이미지 (카테고리별 폴더)
+        └── audio/                   # 전자음악 클립
 ```
 
 ---
 
-## 미정의 부분 (TODO)
+## 파이프라인
 
-### 1. 데이터셋 준비
+### Phase 0: 검증
+- **0-a Sensitivity:** 임베딩 모델이 이펙트를 감지하는지 확인
+- **0-b Linearity:** 델타 방향이 카테고리와 무관하게 일관적인지 확인
 
-#### 이미지 데이터
-- **내용**: Landscape 이미지
-- **형식**: JPG, PNG 등
-- **위치**: `data/experiment/images/`
-- **수량**: 50-100장 권장
+### Phase 1: 발견 (Text Anchor Ensemble)
+- 동의어 확장 + 템플릿 기반 텍스트 델타 생성
+- 3-way 유사도 (곱셈): 프로토타입 ↔ 텍스트 앵커 ↔ 크로스모달 SBERT
+- Discovery Matrix 출력
 
-**옵션**:
-- Unsplash/Pexels에서 landscape 태그 이미지 다운로드
-- CC 라이선스 이미지 사용
-
-#### 오디오 데이터
-- **내용**: 4-bar 전자음악 (techno, house 등)
-- **조건**: 4/4 박자, 120-140 BPM, no vocal
-- **형식**: WAV 또는 MP3
-- **길이**: 4-8초 (4 bars at 120-140 BPM)
-- **위치**: `data/experiment/audio/`
-- **수량**: 50-100개 권장
-
-**옵션**:
-- Bandcamp CC 다운로더 사용: `python scripts/download_bandcamp_cc.py --auto --limit 50`
-- MTG-Jamendo에서 electronic 태그 음악 다운로드
-- 직접 4-bar 세그먼트로 잘라서 준비
+### Phase 3: 학습 (The Decoder)
+- Discovery Matrix 기반 학습 데이터 생성
+- CrossAttention + MLP로 DSP 파라미터 예측
+- 입력: CLAP(audio) + CLAP_text(condition) → 출력: DSP parameters
 
 ---
 
-### 2. Effect Type Mapping 검토
+## 실험 실행
+
+```bash
+# 전체 파이프라인
+python scripts/run_experiment.py all --config configs/experiment.yaml
+
+# 개별 단계
+python scripts/run_experiment.py extract --config configs/experiment.yaml
+python scripts/run_experiment.py sensitivity --config configs/experiment.yaml
+python scripts/run_experiment.py linearity --config configs/experiment.yaml
+python scripts/run_experiment.py phase1 --config configs/experiment.yaml
+python scripts/run_experiment.py phase3 --config configs/experiment.yaml
+```
+
+---
+
+## Effect Type Mapping
 
 현재 가설적 매핑 (`configs/experiment.yaml`):
 
@@ -73,80 +92,3 @@ DeltaV2A/
 | saturation | reverb | (검토 필요) |
 
 이 매핑은 예시로, Phase 1 결과를 보고 조정해야 함.
-
----
-
-### 3. Content Dependency 처리 옵션
-
-실험 문서에서 언급된 3가지 옵션:
-
-**Option C1: Within-content 먼저**
-- 같은 content 내에서만 delta 비교
-- 현재 구현: 지원하지 않음 (TODO)
-
-**Option C2: Content-stratified prototype**
-- Content 그룹별로 평균 → 그 다음 그룹 평균
-- 현재 구현: 부분 지원 (모든 샘플 평균)
-
-**Option C3: Matched-pair analysis**
-- e(I0), e(A0) 유사도가 높은 쌍만 선택
-- 현재 구현: 지원하지 않음 (TODO)
-
----
-
-## 실험 실행 방법
-
-### 1. 데이터 준비
-```bash
-# 데이터 디렉토리 생성
-mkdir -p data/experiment/images
-mkdir -p data/experiment/audio
-
-# 이미지와 오디오 파일을 각 디렉토리에 배치
-```
-
-### 2. Delta 추출
-```bash
-python scripts/run_experiment.py extract --config configs/experiment.yaml
-```
-
-### 3. Phase 1: Prototype 유사도 분석
-```bash
-python scripts/run_experiment.py phase1 --config configs/experiment.yaml
-```
-
-출력:
-- `outputs/experiment/phase1_results.json`: 유사도 매트릭스
-- `outputs/experiment/phase1_heatmap.png`: 히트맵 시각화
-
-### 4. Phase 2: Retrieval 평가
-```bash
-python scripts/run_experiment.py phase2 --config configs/experiment.yaml
-```
-
-출력:
-- Retrieval metrics (MRR, Top-k accuracy)
-- Permutation test p-value
-- Trivial confound baseline
-- Norm monotonicity analysis
-
-### 전체 파이프라인 실행
-```bash
-python scripts/run_experiment.py all --config configs/experiment.yaml
-```
-
----
-
-## 추가 구현 필요 사항
-
-1. **Cross-model replication**
-   - AudioCLIP 또는 CLIP+CLAP 조합으로 동일 실험 반복
-   - 현재: ImageBind만 구현됨
-
-2. **4-bar segment 자동 분할**
-   - 긴 음악 파일을 자동으로 4-bar 세그먼트로 분할
-   - BPM 감지 → bar 계산 → 분할
-
-3. **Visualization 개선**
-   - Intensity별 상세 분석 시각화
-   - Cross-intensity alignment 시각화

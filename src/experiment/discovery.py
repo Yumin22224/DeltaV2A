@@ -90,21 +90,18 @@ def compute_discovery_matrix(
     audio_prototypes: Dict[Tuple[str, str], np.ndarray],
     image_text_anchors: Dict[str, TextAnchor],
     audio_text_anchors: Dict[str, TextAnchor],
-) -> Tuple[np.ndarray, List[str], List[str]]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str], List[str]]:
     """
     Compute discovery matrix using 3-way similarity.
 
     For each (image_effect, audio_effect) pair:
-        score = Sim(img_proto, img_text) × Sim(aud_proto, aud_text) × Sim(img_text, aud_text)
-
-    Args:
-        image_prototypes: (effect_type, intensity) -> prototype vector
-        audio_prototypes: (effect_type, intensity) -> prototype vector
-        image_text_anchors: effect_type -> TextAnchor
-        audio_text_anchors: effect_type -> TextAnchor
+        score = geometric_mean(Sim_img, Sim_aud, Sim_cross)
 
     Returns:
-        matrix: (n_image_effects, n_audio_effects) discovery scores
+        matrix: (n_image, n_audio) combined discovery scores
+        matrix_img: (n_image, n_audio) image proto ↔ image text scores
+        matrix_aud: (n_image, n_audio) audio proto ↔ audio text scores
+        matrix_cross: (n_image, n_audio) image text ↔ audio text (SBERT) scores
         image_labels: List of image effect labels
         audio_labels: List of audio effect labels
     """
@@ -116,17 +113,19 @@ def compute_discovery_matrix(
     image_labels = [f"{effect} ({intensity})" for effect, intensity in image_keys]
     audio_labels = [f"{effect} ({intensity})" for effect, intensity in audio_keys]
 
-    # Initialize matrix
+    # Initialize matrices
     n_image = len(image_keys)
     n_audio = len(audio_keys)
     matrix = np.zeros((n_image, n_audio))
+    matrix_img = np.zeros((n_image, n_audio))
+    matrix_aud = np.zeros((n_image, n_audio))
+    matrix_cross = np.zeros((n_image, n_audio))
 
     # Compute 3-way similarity for each pair
     for i, (img_effect, img_intensity) in enumerate(image_keys):
         for j, (aud_effect, aud_intensity) in enumerate(audio_keys):
             # Skip if text anchors don't exist
             if img_effect not in image_text_anchors or aud_effect not in audio_text_anchors:
-                matrix[i, j] = 0.0
                 continue
 
             # Get vectors
@@ -141,13 +140,17 @@ def compute_discovery_matrix(
             sim_cross = compute_text_anchor_similarity(
                 image_text_anchors[img_effect],
                 audio_text_anchors[aud_effect],
-            )  # Image text ↔ Audio text
+            )  # Image text ↔ Audio text (SBERT)
 
-            # Multiply (AND logic)
-            score = sim_img * sim_aud * sim_cross
-            matrix[i, j] = score
+            matrix_img[i, j] = sim_img
+            matrix_aud[i, j] = sim_aud
+            matrix_cross[i, j] = sim_cross
 
-    return matrix, image_labels, audio_labels
+            # Geometric mean (AND logic)
+            product = sim_img * sim_aud * sim_cross
+            matrix[i, j] = np.sign(product) * np.cbrt(np.abs(product))
+
+    return matrix, matrix_img, matrix_aud, matrix_cross, image_labels, audio_labels
 
 
 def plot_discovery_heatmap(
@@ -155,6 +158,7 @@ def plot_discovery_heatmap(
     image_labels: List[str],
     audio_labels: List[str],
     output_path: str,
+    title: str = "Combined (Geometric Mean)",
 ):
     """
     Plot discovery matrix as a heatmap.
@@ -164,22 +168,27 @@ def plot_discovery_heatmap(
         image_labels: Image effect labels (y-axis)
         audio_labels: Audio effect labels (x-axis)
         output_path: Path to save the plot
+        title: Title suffix for the heatmap
     """
     plt.figure(figsize=(12, 10))
+
+    vmin = matrix.min()
+    vmax = matrix.max()
 
     sns.heatmap(
         matrix,
         xticklabels=audio_labels,
         yticklabels=image_labels,
-        cmap='YlOrRd',
+        cmap='RdBu_r',
         annot=True,
         fmt='.3f',
-        cbar_kws={'label': '3-Way Similarity Score'},
-        vmin=0,
-        vmax=1,
+        cbar_kws={'label': 'Similarity Score'},
+        center=0,
+        vmin=vmin,
+        vmax=vmax,
     )
 
-    plt.title('Effect Correspondence Discovery Matrix\n(Image Effects × Audio Effects)',
+    plt.title(f'Discovery Matrix: {title}\n(Image Effects × Audio Effects)',
               fontsize=14, pad=20)
     plt.xlabel('Audio Effects', fontsize=12)
     plt.ylabel('Image Effects', fontsize=12)
@@ -218,8 +227,8 @@ def run_discovery(
     print("PHASE 1: EFFECT CORRESPONDENCE DISCOVERY")
     print("="*60)
 
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path = Path(output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
 
     # Load deltas
     print("\n1. Loading delta embeddings...")
@@ -261,7 +270,7 @@ def run_discovery(
 
     # Compute discovery matrix
     print("\n4. Computing discovery matrix...")
-    matrix, image_labels, audio_labels = compute_discovery_matrix(
+    matrix, matrix_img, matrix_aud, matrix_cross, image_labels, audio_labels = compute_discovery_matrix(
         image_prototypes=image_prototypes,
         audio_prototypes=audio_prototypes,
         image_text_anchors=image_text_anchors,
@@ -269,25 +278,34 @@ def run_discovery(
     )
     print(f"   Matrix shape: {matrix.shape}")
 
+    # Print individual similarity summaries
+    print("\n5. Individual similarity components:")
+    print(f"   Sim(image_proto, image_text):  min={matrix_img.min():.4f}  max={matrix_img.max():.4f}  mean={matrix_img.mean():.4f}")
+    print(f"   Sim(audio_proto, audio_text):  min={matrix_aud.min():.4f}  max={matrix_aud.max():.4f}  mean={matrix_aud.mean():.4f}")
+    print(f"   Sim(image_text, audio_text):   min={matrix_cross.min():.4f}  max={matrix_cross.max():.4f}  mean={matrix_cross.mean():.4f}")
+    print(f"   Combined (geometric mean):     min={matrix.min():.4f}  max={matrix.max():.4f}  mean={matrix.mean():.4f}")
+
     # Find top correspondences
-    print("\n5. Top correspondences:")
+    print("\n6. Top correspondences:")
     flat_indices = np.argsort(matrix.flatten())[::-1][:10]  # Top 10
     for rank, flat_idx in enumerate(flat_indices, 1):
         i = flat_idx // matrix.shape[1]
         j = flat_idx % matrix.shape[1]
-        score = matrix[i, j]
-        print(f"   {rank:2d}. {image_labels[i]:25s} ↔ {audio_labels[j]:25s}  (score: {score:.4f})")
+        print(f"   {rank:2d}. {image_labels[i]:25s} ↔ {audio_labels[j]:25s}  "
+              f"(combined: {matrix[i,j]:.4f}  img: {matrix_img[i,j]:.4f}  aud: {matrix_aud[i,j]:.4f}  cross: {matrix_cross[i,j]:.4f})")
 
     # Save results
-    print("\n6. Saving results...")
+    print("\n7. Saving results...")
 
-    # Save matrix as numpy
-    matrix_path = output_dir / "discovery_matrix.npy"
-    np.save(matrix_path, matrix)
-    print(f"   Saved matrix to {matrix_path}")
+    # Save matrices as numpy
+    np.save(out_path / "discovery_matrix.npy", matrix)
+    np.save(out_path / "discovery_matrix_img.npy", matrix_img)
+    np.save(out_path / "discovery_matrix_aud.npy", matrix_aud)
+    np.save(out_path / "discovery_matrix_cross.npy", matrix_cross)
+    print(f"   Saved 4 matrices to {out_path}")
 
     # Save labels
-    labels_path = output_dir / "discovery_labels.json"
+    labels_path = out_path / "discovery_labels.json"
     with open(labels_path, 'w') as f:
         json.dump({
             'image_labels': image_labels,
@@ -295,9 +313,19 @@ def run_discovery(
         }, f, indent=2)
     print(f"   Saved labels to {labels_path}")
 
-    # Plot heatmap
-    heatmap_path = output_dir / "discovery_heatmap.png"
-    plot_discovery_heatmap(matrix, image_labels, audio_labels, str(heatmap_path))
+    # Plot heatmaps
+    plot_discovery_heatmap(matrix, image_labels, audio_labels,
+                           str(out_path / "discovery_heatmap.png"),
+                           title="Combined (Geometric Mean)")
+    plot_discovery_heatmap(matrix_img, image_labels, audio_labels,
+                           str(out_path / "discovery_heatmap_img.png"),
+                           title="Sim(Image Proto, Image Text)")
+    plot_discovery_heatmap(matrix_aud, image_labels, audio_labels,
+                           str(out_path / "discovery_heatmap_aud.png"),
+                           title="Sim(Audio Proto, Audio Text)")
+    plot_discovery_heatmap(matrix_cross, image_labels, audio_labels,
+                           str(out_path / "discovery_heatmap_cross.png"),
+                           title="Sim(Image Text, Audio Text) [SBERT]")
 
     print("\n" + "="*60)
     print("PHASE 1 COMPLETE")
@@ -305,6 +333,9 @@ def run_discovery(
 
     return {
         'matrix': matrix,
+        'matrix_img': matrix_img,
+        'matrix_aud': matrix_aud,
+        'matrix_cross': matrix_cross,
         'image_labels': image_labels,
         'audio_labels': audio_labels,
     }
