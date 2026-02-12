@@ -37,21 +37,21 @@ vocab:
 
 # === Phase A-2: Inverse Mapping Database (Music / Controller) ===
 inverse_mapping:
-  augmentations_per_audio: 10
+  augmentations_per_audio: 200
   temperature: 0.1
   seed: 42
   min_active_effects: 1
-  max_active_effects: 2
+  max_active_effects: 3
   # Weighted effect sampling for active-effect selection in Phase A-3.
   # Higher value -> selected more frequently.
   effect_sampling_weights:
-    lowpass: 1.0
-    bitcrush: 2.0
-    reverb: 1.0
-    highpass: 1.0
-    distortion: 1.0
-    phaser: 2.5
-    delay: 1.0
+    lowpass: 0.7
+    bitcrush: 1.5
+    reverb: 0.7
+    highpass: 0.7
+    distortion: 0.7
+    phaser: 3.5
+    delay: 3.5
 
 # === Phase A-3: Inverse Mapping Database (Image / Siamese) ===
 image_inverse_mapping:
@@ -84,9 +84,22 @@ effects:
 
 # === Phase B: Controller Training ===
 controller:
-  hidden_dims: [512, 256, 128]
-  dropout: 0.1
-  batch_size: 64
+  hidden_dims: [1024, 512, 512, 256]
+  dropout: 0.2
+  use_activity_head: true
+  activity_loss_weight: 5.0
+  inactive_param_weight: 0.0
+  param_loss_type: "huber" # one of: mse, huber
+  huber_delta: 0.02
+  effect_loss_weights:
+    lowpass: 1.0
+    bitcrush: 2.0
+    reverb: 1.0
+    highpass: 1.0
+    distortion: 1.0
+    phaser: 10.0
+    delay: 10.0
+  batch_size: 256
   num_epochs: 100
   learning_rate: 0.0001
   val_split: 0.2

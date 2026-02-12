@@ -57,7 +57,7 @@ EFFECT_CATALOG: Dict[str, EffectSpec] = {
         EffectParamSpec('drive_db', 0.0, 40.0, 'linear'),
     ]),
     'phaser': EffectSpec('phaser', [
-        EffectParamSpec('rate_hz', 0.1, 8.0, 'linear'),
+        EffectParamSpec('rate_hz', 0.1, 8.0, 'log'),
         EffectParamSpec('depth', 0.0, 1.0, 'linear'),
         EffectParamSpec('centre_frequency_hz', 300.0, 4000.0, 'log'),
         EffectParamSpec('feedback', 0.0, 0.9, 'linear'),

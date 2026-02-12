@@ -124,15 +124,18 @@ def _evaluate_controller(
 
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
 
-    total_params = sum(EFFECT_CATALOG[name].num_params for name in effect_names)
-    model = AudioController(
-        audio_embed_dim=512,
-        style_vocab_size=style_vocab_size,
-        total_params=total_params,
-        hidden_dims=hidden_dims,
-        dropout=dropout,
-    ).to(device)
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    model_cfg = ckpt.get("model_config", {})
+    total_params = int(model_cfg.get("total_params", sum(EFFECT_CATALOG[name].num_params for name in effect_names)))
+    model = AudioController(
+        audio_embed_dim=int(model_cfg.get("audio_embed_dim", 512)),
+        style_vocab_size=int(model_cfg.get("style_vocab_size", style_vocab_size)),
+        total_params=total_params,
+        hidden_dims=model_cfg.get("hidden_dims", hidden_dims),
+        dropout=float(model_cfg.get("dropout", dropout)),
+        use_activity_head=bool(model_cfg.get("use_activity_head", False)),
+        num_effects=int(model_cfg.get("num_effects", len(effect_names))),
+    ).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 

@@ -324,6 +324,12 @@ def run_train(config: dict):
             val_split=ctrl_cfg['val_split'],
             hidden_dims=ctrl_cfg.get('hidden_dims'),
             dropout=ctrl_cfg.get('dropout', 0.1),
+            use_activity_head=bool(ctrl_cfg.get('use_activity_head', False)),
+            activity_loss_weight=float(ctrl_cfg.get('activity_loss_weight', 0.0)),
+            inactive_param_weight=float(ctrl_cfg.get('inactive_param_weight', 1.0)),
+            param_loss_type=str(ctrl_cfg.get('param_loss_type', 'mse')),
+            huber_delta=float(ctrl_cfg.get('huber_delta', 0.05)),
+            effect_loss_weights=ctrl_cfg.get('effect_loss_weights'),
             device=config.get('device', 'cpu'),
         )
 

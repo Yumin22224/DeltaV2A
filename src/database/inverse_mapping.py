@@ -12,6 +12,7 @@ Each record:
   - clap_embedding: (512,) float32   # CLAP(A), raw input context
   - style_label: (|AUD_VOCAB|,) float32
   - normalized_params: (total_params,) float32
+  - effect_active_mask: (|effects|,) float32
 """
 
 import numpy as np
@@ -61,6 +62,14 @@ class InverseMappingDataset:
             self.clap_embeddings = f['clap_embeddings'][:actual]
             self.style_labels = f['style_labels'][:actual]
             self.normalized_params = f['normalized_params'][:actual]
+            effect_names_raw = str(f.attrs.get('effect_names', '')).strip()
+            self.effect_names = [x for x in effect_names_raw.split(',') if x]
+            if 'effect_active_mask' in f:
+                self.effect_active_mask = f['effect_active_mask'][:actual]
+            else:
+                self.effect_active_mask = _infer_effect_active_masks_from_params(
+                    self.normalized_params, self.effect_names
+                )
         self._size = len(self.clap_embeddings)
 
     def __len__(self) -> int:
@@ -71,6 +80,7 @@ class InverseMappingDataset:
             'clap_embedding': torch.from_numpy(self.clap_embeddings[idx]),
             'style_label': torch.from_numpy(self.style_labels[idx]),
             'normalized_params': torch.from_numpy(self.normalized_params[idx]),
+            'effect_active_mask': torch.from_numpy(self.effect_active_mask[idx]),
         }
 
 
@@ -89,6 +99,41 @@ def _compute_style_label(
     logits = logits - logits.max()
     exp_logits = np.exp(logits)
     return (exp_logits / exp_logits.sum()).astype(np.float32)
+
+
+def _effect_param_slices(effect_names: List[str]) -> List[slice]:
+    slices: List[slice] = []
+    start = 0
+    for effect_name in effect_names:
+        width = EFFECT_CATALOG[effect_name].num_params
+        slices.append(slice(start, start + width))
+        start += width
+    return slices
+
+
+def _infer_effect_active_masks_from_params(
+    normalized_params: np.ndarray,
+    effect_names: List[str],
+    eps: float = 1e-4,
+) -> np.ndarray:
+    """
+    Infer effect on/off masks from normalized params.
+
+    This is used as a fallback for old DB files that were built before
+    `effect_active_mask` was added.
+    """
+    if normalized_params.ndim != 2:
+        raise ValueError(f"normalized_params must be 2D, got {normalized_params.shape}")
+    if not effect_names:
+        return np.zeros((normalized_params.shape[0], 0), dtype=np.float32)
+
+    bypass_norm = normalize_params({}, effect_names)
+    slices = _effect_param_slices(effect_names)
+    masks = np.zeros((normalized_params.shape[0], len(effect_names)), dtype=np.float32)
+    for i, sl in enumerate(slices):
+        diff = np.abs(normalized_params[:, sl] - bypass_norm[sl])
+        masks[:, i] = (np.max(diff, axis=1) > eps).astype(np.float32)
+    return masks
 
 
 def build_inverse_mapping_db(
@@ -168,6 +213,7 @@ def build_inverse_mapping_db(
         clap_ds = f.create_dataset('clap_embeddings', shape=(total_records, 512), dtype='float32')
         style_ds = f.create_dataset('style_labels', shape=(total_records, vocab_size), dtype='float32')
         params_ds = f.create_dataset('normalized_params', shape=(total_records, total_params), dtype='float32')
+        active_ds = f.create_dataset('effect_active_mask', shape=(total_records, len(effect_names)), dtype='float32')
 
         f.attrs['effect_names'] = ','.join(effect_names)
         f.attrs['total_params'] = total_params
@@ -175,6 +221,7 @@ def build_inverse_mapping_db(
         f.attrs['sample_rate'] = sample_rate
         f.attrs['temperature'] = temperature
         f.attrs['input_context'] = 'clap_raw_audio'
+        f.attrs['num_effects'] = len(effect_names)
         f.attrs['min_active_effects'] = min_active_effects
         f.attrs['max_active_effects'] = max_active_effects
         f.attrs['effect_sampling_weights_json'] = json.dumps(
@@ -217,6 +264,10 @@ def build_inverse_mapping_db(
                             active_effect_counts[effect] += 1
                         params_dict = sample_random_params(active_effects, rng)
                         norm_params = normalize_params(params_dict, effect_names)
+                        active_mask = np.array(
+                            [1.0 if name in active_effects else 0.0 for name in effect_names],
+                            dtype=np.float32,
+                        )
 
                         # Apply effects
                         processed = renderer.render(waveform, params_dict)
@@ -241,6 +292,7 @@ def build_inverse_mapping_db(
                         clap_ds[record_idx] = clap_raw
                         style_ds[record_idx] = style_label
                         params_ds[record_idx] = norm_params
+                        active_ds[record_idx] = active_mask
 
                         if manifest_fp is not None:
                             # Keep a lightweight trace so generated audio can be audited later.

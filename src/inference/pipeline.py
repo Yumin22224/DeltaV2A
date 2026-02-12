@@ -122,12 +122,6 @@ class DeltaV2APipeline:
                 print(f"Warning: visual encoder checkpoint not found: {ve_ckpt_path}. Using CLIP-delta fallback.")
 
         # Load controller
-        total_params = get_total_param_count(effect_names)
-        controller = AudioController(
-            audio_embed_dim=512,
-            style_vocab_size=style_vocab.aud_vocab.size,
-            total_params=total_params,
-        )
         ctrl_ckpt_path = artifacts / 'controller_best.pt'
         if not ctrl_ckpt_path.exists():
             legacy_path = artifacts / 'controller' / 'controller_best.pt'
@@ -139,6 +133,17 @@ class DeltaV2APipeline:
                 f"or {artifacts / 'controller' / 'controller_best.pt'}"
             )
         ctrl_ckpt = torch.load(ctrl_ckpt_path, map_location=device, weights_only=True)
+        ctrl_model_cfg = ctrl_ckpt.get("model_config", {})
+        total_params = int(ctrl_model_cfg.get("total_params", get_total_param_count(effect_names)))
+        controller = AudioController(
+            audio_embed_dim=int(ctrl_model_cfg.get("audio_embed_dim", 512)),
+            style_vocab_size=int(ctrl_model_cfg.get("style_vocab_size", style_vocab.aud_vocab.size)),
+            total_params=total_params,
+            hidden_dims=ctrl_model_cfg.get("hidden_dims"),
+            dropout=float(ctrl_model_cfg.get("dropout", 0.1)),
+            use_activity_head=bool(ctrl_model_cfg.get("use_activity_head", False)),
+            num_effects=int(ctrl_model_cfg.get("num_effects", len(effect_names))),
+        )
         controller.load_state_dict(ctrl_ckpt['model_state_dict'])
 
         return cls(
