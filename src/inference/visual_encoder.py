@@ -93,6 +93,25 @@ class VisualEncoder(nn.Module):
             z_visual: (B, projection_dim) L2-normalized
         """
         clip_orig, clip_edit, clip_diff = self._encode_images(original, edited)
+        return self.forward_from_clip_embeddings(clip_orig, clip_edit, clip_diff)
+
+    def forward_from_clip_embeddings(
+        self,
+        clip_orig: torch.Tensor,
+        clip_edit: torch.Tensor,
+        clip_diff: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Encode pre-computed CLIP embeddings into z_visual.
+
+        Args:
+            clip_orig: (B, D) normalized CLIP(I)
+            clip_edit: (B, D) normalized CLIP(I')
+            clip_diff: (B, D) normalized CLIP(I'-I image)
+
+        Returns:
+            z_visual: (B, projection_dim) L2-normalized
+        """
         concat = torch.cat([clip_orig, clip_edit, clip_diff], dim=-1)
         z_visual = self.projection(concat)
         return nn.functional.normalize(z_visual, p=2, dim=-1)

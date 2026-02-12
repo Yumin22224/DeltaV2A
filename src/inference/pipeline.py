@@ -6,7 +6,7 @@ End-to-end: (I, I', A) -> A'
 Steps:
     1. Visual Encoding: (I, I') -> z_visual
     2. Style Retrieval: z_visual vs IMG_VOCAB -> top-k with sim scores
-    3. Cross-Modal Mapping: correspondence matrix -> AUD_VOCAB weights
+    3. Cross-Modal Mapping: identity transfer (shared IMG/AUD vocab axes)
     4. Audio Controller: CLAP(A) + audio_style -> predicted params
     5. Rendering: pedalboard applies params -> A'
 """
@@ -15,11 +15,10 @@ import torch
 import numpy as np
 from typing import Dict, List, Optional
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .visual_encoder import VisualEncoder
 from ..vocab.style_vocab import StyleVocabulary
-from ..correspondence.sbert_matrix import CorrespondenceMatrix
 from ..controller.model import AudioController
 from ..effects.pedalboard_effects import PedalboardRenderer, denormalize_params
 
@@ -44,7 +43,6 @@ class DeltaV2APipeline:
         self,
         visual_encoder: VisualEncoder,
         style_vocab: StyleVocabulary,
-        correspondence: CorrespondenceMatrix,
         controller: AudioController,
         clap_embedder,
         effect_names: List[str],
@@ -55,7 +53,6 @@ class DeltaV2APipeline:
     ):
         self.visual_encoder = visual_encoder
         self.style_vocab = style_vocab
-        self.correspondence = correspondence
         self.controller = controller
         self.clap = clap_embedder
         self.effect_names = effect_names
@@ -94,9 +91,6 @@ class DeltaV2APipeline:
         style_vocab = StyleVocabulary()
         style_vocab.load(str(artifacts))
 
-        # Load correspondence matrix
-        correspondence = CorrespondenceMatrix.load(str(artifacts / 'correspondence_matrix.npz'))
-
         # Load visual encoder (optional checkpoint)
         visual_encoder = VisualEncoder(clip_embedder=clip_embedder, projection_dim=projection_dim)
         ve_ckpt_path = artifacts / 'visual_encoder.pt'
@@ -131,7 +125,6 @@ class DeltaV2APipeline:
         return cls(
             visual_encoder=visual_encoder,
             style_vocab=style_vocab,
-            correspondence=correspondence,
             controller=controller,
             clap_embedder=clap_embedder,
             effect_names=effect_names,
@@ -192,8 +185,13 @@ class DeltaV2APipeline:
         top_k_terms = [self.style_vocab.img_vocab.terms[i] for i in top_k_indices]
         top_k_scores = [float(img_sims[i]) for i in top_k_indices]
 
-        # Step 3: Cross-Modal Mapping
-        aud_style_scores = self.correspondence.map_visual_to_audio(img_style_scores)
+        # Step 3: Cross-Modal Mapping (identity over shared axes)
+        if self.style_vocab.img_vocab.size != self.style_vocab.aud_vocab.size:
+            raise ValueError(
+                "IMG/AUD vocab sizes differ. This pipeline assumes shared axes without "
+                "a correspondence matrix."
+            )
+        aud_style_scores = img_style_scores.astype(np.float32, copy=True)
 
         # Step 4: Audio Controller
         audio_tensor = torch.from_numpy(input_audio).float()

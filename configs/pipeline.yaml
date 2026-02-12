@@ -35,11 +35,7 @@ vocab:
   img_terms: null  # null = use default IMG_VOCAB_TERMS
   aud_terms: null  # null = use default AUD_VOCAB_TERMS
 
-# === Phase A-2: Correspondence ===
-correspondence:
-  sbert_model: "all-MiniLM-L6-v2"
-
-# === Phase A-3: Inverse Mapping Database ===
+# === Phase A-2: Inverse Mapping Database (Music / Controller) ===
 inverse_mapping:
   augmentations_per_audio: 10
   temperature: 0.1
@@ -56,6 +52,15 @@ inverse_mapping:
     distortion: 1.0
     phaser: 2.5
     delay: 1.0
+
+# === Phase A-3: Inverse Mapping Database (Image / Siamese) ===
+image_inverse_mapping:
+  augmentations_per_image: 2
+  effect_types: ["adaptive_blur", "motion_blur", "adaptive_sharpen", "add_noise", "spread", "sepia_tone", "solarize"]
+  intensities: ["low", "mid", "high"]
+  seed: 42
+  save_augmented_images: true
+  augmented_image_dir: "data/augmented/pipeline/images"
 
 # === Pedalboard Effects ===
 effects:
@@ -100,17 +105,7 @@ visual_encoder:
     num_epochs: 40
     learning_rate: 0.0001
     val_split: 0.2
-    augmentations_per_image: 2
-    effect_types: ["adaptive_blur", "motion_blur", "adaptive_sharpen", "add_noise", "spread", "sepia_tone", "solarize"]
-    intensities: ["low", "mid", "high"]
-    style_temperature: 0.07
-    contrastive_margin: 0.3
-    loss_weight_align: 1.0
-    loss_weight_style: 0.5
-    loss_weight_contrastive: 0.2
     seed: 42
-    save_augmented_images: true
-    augmented_image_dir: "data/augmented/pipeline/images"
 
 # === Phase C: Inference ===
 inference:

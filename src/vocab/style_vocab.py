@@ -6,7 +6,7 @@ AUD_VOCAB: Audio style terms embedded via CLAP text encoder -> (|V_aud|, 512)
 
 Each term has:
   - phrase: Full sentence for CLIP/CLAP embedding (modality-specific context)
-  - keyword: Core concept for SBERT correspondence (modality-neutral)
+  - keyword: Core concept token (modality-neutral)
 """
 
 import numpy as np
@@ -15,62 +15,48 @@ from pathlib import Path
 from dataclasses import dataclass
 
 
+# Common cross-modal style axes.
+# We keep identical concept order for image/audio vocabularies.
+STYLE_AXES_PHASES: List[Tuple[str, List[Tuple[str, str]]]] = [
+    ("phase_1", [
+        ("warm", "cold"),
+        ("bright", "dark"),
+        ("rough", "smooth"),
+        ("heavy", "light"),
+    ]),
+    ("phase_2", [
+        ("thick", "thin"),
+        ("distant", "intimate"),
+        ("soft", "hard"),
+        ("static", "dynamic"),
+    ]),
+    ("phase_3_abstract", [
+        ("clean", "dirty"),
+        ("dreamy", "realistic"),
+        ("vintage", "modern"),
+        ("natural", "surreal"),
+    ]),
+]
+
+
+def _flatten_axes_words(phases: List[Tuple[str, List[Tuple[str, str]]]]) -> List[str]:
+    words: List[str] = []
+    for _, pairs in phases:
+        for left, right in pairs:
+            words.extend([left, right])
+    return words
+
+
+COMMON_STYLE_WORDS: List[str] = _flatten_axes_words(STYLE_AXES_PHASES)
+
 # === Visual style vocabulary: (phrase, keyword) ===
-# Broad visual descriptors (not tightly bound to specific processing operators).
 IMG_VOCAB: List[Tuple[str, str]] = [
-    ("a soft-focus dreamy photograph", "soft-focus dreamy"),
-    ("a motion-streaked dynamic photograph", "motion-streaked dynamic"),
-    ("a crisp and highly detailed image", "crisp high detail"),
-    ("a grainy and textured image", "grainy textured"),
-    ("a smeared and painterly image", "smeared painterly"),
-    ("a vintage warm-toned image", "vintage warm-toned"),
-    ("a surreal color-shifted image", "surreal color-shifted"),
-    ("a clear and neutral realistic image", "clear neutral realistic"),
-    ("a clean low-noise image", "clean low-noise"),
-    ("a high-contrast dramatic image", "dramatic high-contrast"),
-    ("a low-contrast flat image", "flat low-contrast"),
-    ("a vivid and saturated color image", "vivid saturated color"),
-    ("a muted and desaturated color image", "muted desaturated color"),
-    ("a bright luminous exposure", "bright luminous exposure"),
-    ("a dim and moody exposure", "dim moody exposure"),
-    ("a cool bluish color cast", "cool bluish color cast"),
-    ("a warm golden color cast", "warm golden color cast"),
-    ("a hazy atmospheric image", "hazy atmospheric"),
-    ("an edge-sharp high-clarity image", "edge-sharp high-clarity"),
-    ("a smooth and refined texture image", "smooth refined texture"),
-    ("a monochrome black-and-white image", "monochrome black-and-white"),
-    ("a faded film-like image", "faded film-like"),
-    ("a glossy polished image finish", "glossy polished finish"),
-    ("a matte soft image finish", "matte soft finish"),
+    (f"a {word} image", word) for word in COMMON_STYLE_WORDS
 ]
 
 # === Audio style vocabulary: (phrase, keyword) ===
-# Broad audio descriptors (not tightly bound to specific processing operators).
 AUD_VOCAB: List[Tuple[str, str]] = [
-    ("warm and full-bodied audio", "warm full-bodied"),
-    ("bright and airy audio", "bright airy"),
-    ("dark and muffled audio", "dark muffled"),
-    ("clean and transparent audio", "clean transparent"),
-    ("gritty and rough audio texture", "gritty rough texture"),
-    ("punchy and transient-forward audio", "punchy transient-forward"),
-    ("soft and rounded transients", "soft rounded transients"),
-    ("tight dry and close audio", "tight dry close"),
-    ("spacious wide and ambient audio", "spacious wide ambient"),
-    ("distant and washed-out audio", "distant washed-out"),
-    ("thick dense layered audio", "thick dense layered"),
-    ("thin and lightweight audio", "thin lightweight"),
-    ("smooth polished audio finish", "smooth polished finish"),
-    ("noisy textured lo-fi audio", "noisy textured lo-fi"),
-    ("stable and centered audio image", "stable centered"),
-    ("swirling moving stereo image", "swirling moving stereo"),
-    ("resonant and ringing audio", "resonant ringing"),
-    ("echoing and repeating tails", "echoing repeating tails"),
-    ("deep heavy low-end audio", "deep heavy low-end"),
-    ("light and lean low-end audio", "light lean low-end"),
-    ("forward upfront audio presence", "forward upfront presence"),
-    ("recessed background audio presence", "recessed background presence"),
-    ("sharp and edgy timbre", "sharp edgy timbre"),
-    ("gentle mellow timbre", "gentle mellow timbre"),
+    (f"a {word} sound", word) for word in COMMON_STYLE_WORDS
 ]
 
 # Convenience accessors
@@ -84,7 +70,7 @@ AUD_VOCAB_KEYWORDS: List[str] = [kw for _, kw in AUD_VOCAB]
 class VocabEmbeddings:
     """Pre-computed vocabulary embeddings."""
     terms: List[str]       # phrases (for CLIP/CLAP embedding)
-    keywords: List[str]    # keywords (for SBERT correspondence)
+    keywords: List[str]    # modality-neutral concept tokens
     embeddings: np.ndarray  # (|V|, embed_dim)
     modality: str  # "image" or "audio"
 

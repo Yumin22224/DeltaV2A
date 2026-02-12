@@ -3,8 +3,8 @@
 DeltaV2A Pipeline Runner (Phase A-C)
 
 Commands:
-  precompute    - Phase A: Build vocab, correspondence matrix, inverse mapping DB
-  train         - Phase B: Train controller + visual siamese encoder
+  precompute    - Phase A: Build vocab + inverse mapping DBs (music/image)
+  train         - Phase B: Train controller + Siamese visual encoder
   infer         - Phase C: Run inference (I, I', A) -> A'
   all           - precompute + train
 
@@ -162,11 +162,9 @@ def get_image_paths(config: dict) -> list:
 # =============================================================================
 
 def run_precompute(config: dict):
-    """Phase A: Build vocab, correspondence matrix, inverse mapping DB."""
-    import numpy as np
+    """Phase A: Build vocab + inverse mapping DBs (music + image)."""
     from src.vocab import StyleVocabulary
-    from src.correspondence import compute_correspondence_matrix, save_correspondence_heatmap
-    from src.database import build_inverse_mapping_db
+    from src.database import build_inverse_mapping_db, build_image_inverse_mapping_db
     from src.effects.pedalboard_effects import get_total_param_count
 
     output_dir = Path(config['output']['dir'])
@@ -185,56 +183,82 @@ def run_precompute(config: dict):
     vocab.build_aud_vocab(clap)
     vocab.save(str(output_dir))
 
-    # --- Phase A-2: Correspondence Matrix ---
+    # --- Phase A-2: Inverse Mapping Database (Music) ---
     print("\n" + "=" * 60)
-    print("PHASE A-2: BUILD CORRESPONDENCE MATRIX")
-    print("=" * 60)
-
-    sbert_model = config['correspondence']['sbert_model']
-    corr = compute_correspondence_matrix(
-        vocab.img_vocab.keywords,
-        vocab.aud_vocab.keywords,
-        sbert_model_name=sbert_model,
-    )
-    corr.save(str(output_dir / "correspondence_matrix.npz"))
-    try:
-        save_correspondence_heatmap(
-            correspondence=corr,
-            output_path=str(output_dir / "correspondence_heatmap.png"),
-        )
-    except Exception as e:
-        print(f"Warning: Failed to save correspondence heatmap: {e}")
-
-    # --- Phase A-3: Inverse Mapping Database ---
-    print("\n" + "=" * 60)
-    print("PHASE A-3: BUILD INVERSE MAPPING DATABASE")
+    print("PHASE A-2: BUILD INVERSE MAPPING DATABASE (MUSIC)")
     print("=" * 60)
 
     audio_paths = get_audio_paths(config)
     print(f"Found {len(audio_paths)} audio files")
 
-    if not audio_paths:
-        print("ERROR: No audio files found. Skipping inverse mapping.")
-        return
-
     inv_cfg = config['inverse_mapping']
-    db = build_inverse_mapping_db(
-        audio_paths=audio_paths,
-        clap_embedder=clap,
-        aud_vocab_embeddings=vocab.aud_vocab.embeddings,
-        effect_names=effect_names,
-        output_path=str(output_dir / "inverse_mapping.h5"),
-        num_augmentations_per_audio=inv_cfg['augmentations_per_audio'],
-        sample_rate=config['model']['clap']['sample_rate'],
-        max_duration=config['model']['clap']['max_duration'],
-        temperature=inv_cfg['temperature'],
-        seed=inv_cfg['seed'],
-        save_augmented_audio=config['data'].get('save_augmented_audio', True),
-        augmented_audio_dir=config['data'].get('augmented_audio_dir', "data/augmented/pipeline/audio"),
-        min_active_effects=inv_cfg.get('min_active_effects', 1),
-        max_active_effects=inv_cfg.get('max_active_effects'),
-        effect_sampling_weights=inv_cfg.get('effect_sampling_weights'),
-    )
+    if not audio_paths:
+        print("WARNING: No audio files found. Skipping music inverse mapping DB.")
+    else:
+        build_inverse_mapping_db(
+            audio_paths=audio_paths,
+            clap_embedder=clap,
+            aud_vocab_embeddings=vocab.aud_vocab.embeddings,
+            effect_names=effect_names,
+            output_path=str(output_dir / "inverse_mapping.h5"),
+            num_augmentations_per_audio=inv_cfg['augmentations_per_audio'],
+            sample_rate=config['model']['clap']['sample_rate'],
+            max_duration=config['model']['clap']['max_duration'],
+            temperature=inv_cfg['temperature'],
+            seed=inv_cfg['seed'],
+            save_augmented_audio=config['data'].get('save_augmented_audio', True),
+            augmented_audio_dir=config['data'].get('augmented_audio_dir', "data/augmented/pipeline/audio"),
+            min_active_effects=inv_cfg.get('min_active_effects', 1),
+            max_active_effects=inv_cfg.get('max_active_effects'),
+            effect_sampling_weights=inv_cfg.get('effect_sampling_weights'),
+        )
+
+    # --- Phase A-3: Inverse Mapping Database (Image) ---
+    print("\n" + "=" * 60)
+    print("PHASE A-3: BUILD INVERSE MAPPING DATABASE (IMAGE)")
+    print("=" * 60)
+
+    image_paths = get_image_paths(config)
+    print(f"Found {len(image_paths)} image files")
+
+    if not image_paths:
+        print("WARNING: No image files found. Skipping image inverse mapping DB.")
+    else:
+        img_inv_cfg = config.get('image_inverse_mapping', {})
+        ve_cfg = config.get('visual_encoder', {}).get('training', {})
+        build_image_inverse_mapping_db(
+            image_paths=image_paths,
+            clip_embedder=clip,
+            img_vocab_embeddings=vocab.img_vocab.embeddings,
+            output_path=str(output_dir / "image_inverse_mapping.h5"),
+            augmentations_per_image=int(
+                img_inv_cfg.get('augmentations_per_image', ve_cfg.get('augmentations_per_image', 2))
+            ),
+            effect_types=img_inv_cfg.get(
+                'effect_types',
+                ve_cfg.get(
+                    'effect_types',
+                    [
+                        "adaptive_blur",
+                        "motion_blur",
+                        "adaptive_sharpen",
+                        "add_noise",
+                        "spread",
+                        "sepia_tone",
+                        "solarize",
+                    ],
+                ),
+            ),
+            intensities=img_inv_cfg.get('intensities', ve_cfg.get('intensities', ["low", "mid", "high"])),
+            seed=int(img_inv_cfg.get('seed', ve_cfg.get('seed', 42))),
+            save_augmented_images=bool(
+                img_inv_cfg.get('save_augmented_images', ve_cfg.get('save_augmented_images', False))
+            ),
+            augmented_image_dir=img_inv_cfg.get(
+                'augmented_image_dir',
+                ve_cfg.get('augmented_image_dir', "data/augmented/pipeline/images"),
+            ),
+        )
 
     # Save pipeline config for inference loading
     pipeline_config = {
@@ -245,6 +269,7 @@ def run_precompute(config: dict):
         'top_k': config['inference']['top_k'],
         'img_vocab_size': vocab.img_vocab.size,
         'aud_vocab_size': vocab.aud_vocab.size,
+        'shared_vocab_axes': True,
     }
     with open(output_dir / 'pipeline_config.json', 'w') as f:
         json.dump(pipeline_config, f, indent=2)
@@ -259,7 +284,7 @@ def run_precompute(config: dict):
 # =============================================================================
 
 def run_train(config: dict):
-    """Phase B: Train controller + visual siamese encoder."""
+    """Phase B: Train controller + Siamese visual encoder."""
     from src.controller import train_controller, run_controller_post_train_analysis
     from src.effects.pedalboard_effects import get_total_param_count
     from src.inference import train_visual_encoder
@@ -268,10 +293,6 @@ def run_train(config: dict):
 
     output_dir = Path(config['output']['dir'])
     db_path = output_dir / "inverse_mapping.h5"
-
-    if not db_path.exists():
-        print("ERROR: Inverse mapping DB not found. Run 'precompute' first.")
-        return
 
     # Load pipeline config
     with open(output_dir / 'pipeline_config.json', 'r') as f:
@@ -284,63 +305,65 @@ def run_train(config: dict):
     print("\n" + "=" * 60)
     print("PHASE B: TRAIN AUDIO CONTROLLER")
     print("=" * 60)
+    if not db_path.exists():
+        print(f"WARNING: Controller DB not found: {db_path}. Skipping controller training.")
+    else:
+        train_controller(
+            db_path=str(db_path),
+            output_dir=str(output_dir / "controller"),
+            style_vocab_size=pipeline_cfg['aud_vocab_size'],
+            total_params=get_total_param_count(effect_names),
+            batch_size=ctrl_cfg['batch_size'],
+            num_epochs=ctrl_cfg['num_epochs'],
+            learning_rate=controller_lr,
+            val_split=ctrl_cfg['val_split'],
+            hidden_dims=ctrl_cfg.get('hidden_dims'),
+            dropout=ctrl_cfg.get('dropout', 0.1),
+            device=config.get('device', 'cpu'),
+        )
 
-    train_controller(
-        db_path=str(db_path),
-        output_dir=str(output_dir / "controller"),
-        style_vocab_size=pipeline_cfg['aud_vocab_size'],
-        total_params=get_total_param_count(effect_names),
-        batch_size=ctrl_cfg['batch_size'],
-        num_epochs=ctrl_cfg['num_epochs'],
-        learning_rate=controller_lr,
-        val_split=ctrl_cfg['val_split'],
-        hidden_dims=ctrl_cfg.get('hidden_dims'),
-        dropout=ctrl_cfg.get('dropout', 0.1),
-        device=config.get('device', 'cpu'),
-    )
+        # Mirror best checkpoint to root for inference loader compatibility.
+        best_ckpt = output_dir / "controller" / "controller_best.pt"
+        if best_ckpt.exists():
+            shutil.copy2(best_ckpt, output_dir / "controller_best.pt")
 
-    # Mirror best checkpoint to root for inference loader compatibility.
-    best_ckpt = output_dir / "controller" / "controller_best.pt"
-    if best_ckpt.exists():
-        shutil.copy2(best_ckpt, output_dir / "controller_best.pt")
+        # Phase B-1 post-train analysis (pred vs target report + A/B renders)
+        analysis_cfg = ctrl_cfg.get('post_train_analysis', {})
+        if analysis_cfg.get('enabled', True):
+            print("\n" + "=" * 60)
+            print("PHASE B-1: CONTROLLER POST-TRAIN ANALYSIS")
+            print("=" * 60)
+            try:
+                def _pick(name, default):
+                    val = analysis_cfg.get(name, None)
+                    return default if val is None else val
 
-    # Phase B-1 post-train analysis (pred vs target report + A/B renders)
-    analysis_cfg = ctrl_cfg.get('post_train_analysis', {})
-    if analysis_cfg.get('enabled', True):
-        print("\n" + "=" * 60)
-        print("PHASE B-1: CONTROLLER POST-TRAIN ANALYSIS")
-        print("=" * 60)
-        try:
-            def _pick(name, default):
-                val = analysis_cfg.get(name, None)
-                return default if val is None else val
+                manifest_path = analysis_cfg.get('manifest_path')
+                if manifest_path is None:
+                    aug_audio_dir = config.get('data', {}).get('augmented_audio_dir')
+                    if aug_audio_dir:
+                        manifest_path = str(Path(aug_audio_dir) / "manifest.jsonl")
 
-            manifest_path = analysis_cfg.get('manifest_path')
-            if manifest_path is None:
-                aug_audio_dir = config.get('data', {}).get('augmented_audio_dir')
-                if aug_audio_dir:
-                    manifest_path = str(Path(aug_audio_dir) / "manifest.jsonl")
-
-            analysis_report = run_controller_post_train_analysis(
-                artifacts_dir=str(output_dir),
-                out_dir=_pick('out_dir', None),
-                val_split=float(_pick('val_split', ctrl_cfg.get('val_split', 0.2))),
-                split_seed=int(_pick('split_seed', 42)),
-                batch_size=int(_pick('batch_size', 128)),
-                num_renders=int(_pick('num_renders', 5)),
-                sample_rate=int(_pick('sample_rate', config['model']['clap'].get('sample_rate', 48000))),
-                max_duration=float(_pick('max_duration', config['model']['clap'].get('max_duration', 20.0))),
-                device=str(_pick('device', config.get('device', 'cpu'))),
-                manifest_path=manifest_path,
-                hidden_dims=_pick('hidden_dims', ctrl_cfg.get('hidden_dims', [512, 256, 128])),
-                dropout=float(_pick('dropout', ctrl_cfg.get('dropout', 0.1))),
-            )
-            report_path = Path(analysis_report['val_metrics_summary_json']).parent / "analysis_report.json"
-            print(f"Controller analysis report: {report_path}")
-            print(f"  Best val loss: {analysis_report['curve_summary']['best_val_loss']:.6f}")
-            print(f"  Rendered examples: {analysis_report['num_rendered_examples']}")
-        except Exception as e:
-            print(f"WARNING: Controller post-train analysis failed: {e}")
+                analysis_report = run_controller_post_train_analysis(
+                    artifacts_dir=str(output_dir),
+                    out_dir=_pick('out_dir', None),
+                    val_split=float(_pick('val_split', ctrl_cfg.get('val_split', 0.2))),
+                    split_seed=int(_pick('split_seed', 42)),
+                    batch_size=int(_pick('batch_size', 128)),
+                    num_renders=int(_pick('num_renders', 5)),
+                    sample_rate=int(_pick('sample_rate', config['model']['clap'].get('sample_rate', 48000))),
+                    max_duration=float(_pick('max_duration', config['model']['clap'].get('max_duration', 20.0))),
+                    device=str(_pick('device', config.get('device', 'cpu'))),
+                    manifest_path=manifest_path,
+                    hidden_dims=_pick('hidden_dims', ctrl_cfg.get('hidden_dims', [512, 256, 128])),
+                    dropout=float(_pick('dropout', ctrl_cfg.get('dropout', 0.1))),
+                )
+                report_path = Path(analysis_report['val_metrics_summary_json']).parent / "analysis_report.json"
+                print(f"Controller analysis report: {report_path}")
+                print(f"  Best val loss: {analysis_report['curve_summary']['best_val_loss']:.6f}")
+                print(f"  Rendered examples: {analysis_report['num_rendered_examples']}")
+            except Exception as e:
+                print(f"WARNING: Controller post-train analysis failed: {e}")
 
     # Phase B-2: Train visual siamese encoder
     ve_cfg = config.get('visual_encoder', {}).get('training', {})
@@ -349,9 +372,12 @@ def run_train(config: dict):
         print("PHASE B-2: TRAIN VISUAL SIAMESE ENCODER")
         print("=" * 60)
 
-        image_paths = get_image_paths(config)
-        if not image_paths:
-            print("WARNING: No image files found. Skipping visual encoder training.")
+        image_db_path = output_dir / "image_inverse_mapping.h5"
+        if not image_db_path.exists():
+            print(
+                "WARNING: image inverse mapping DB not found. "
+                f"Expected: {image_db_path}. Run 'precompute' first."
+            )
         else:
             device = config.get('device', 'cpu')
             clip_cfg = config['model']['clip']
@@ -367,7 +393,7 @@ def run_train(config: dict):
                 raise RuntimeError("IMG_VOCAB not found. Run precompute first.")
 
             train_visual_encoder(
-                image_paths=image_paths,
+                image_db_path=str(image_db_path),
                 clip_embedder=clip,
                 img_vocab_embeddings=vocab.img_vocab.embeddings,
                 save_path=str(output_dir / "visual_encoder.pt"),
@@ -377,27 +403,6 @@ def run_train(config: dict):
                 num_epochs=ve_cfg.get('num_epochs', 40),
                 learning_rate=float(ve_cfg.get('learning_rate', 1e-4)),
                 val_split=ve_cfg.get('val_split', 0.2),
-                augmentations_per_image=ve_cfg.get('augmentations_per_image', 2),
-                effect_types=ve_cfg.get(
-                    'effect_types',
-                    [
-                        "adaptive_blur",
-                        "motion_blur",
-                        "adaptive_sharpen",
-                        "add_noise",
-                        "spread",
-                        "sepia_tone",
-                        "solarize",
-                    ],
-                ),
-                intensities=ve_cfg.get('intensities', ["low", "mid", "high"]),
-                save_augmented=ve_cfg.get('save_augmented_images', False),
-                augmented_dir=ve_cfg.get('augmented_image_dir', "data/augmented/pipeline/images"),
-                style_temperature=ve_cfg.get('style_temperature', 0.07),
-                contrastive_margin=ve_cfg.get('contrastive_margin', 0.3),
-                loss_weight_align=ve_cfg.get('loss_weight_align', 1.0),
-                loss_weight_style=ve_cfg.get('loss_weight_style', 0.5),
-                loss_weight_contrastive=ve_cfg.get('loss_weight_contrastive', 0.2),
                 seed=ve_cfg.get('seed', 42),
                 device=device,
             )
