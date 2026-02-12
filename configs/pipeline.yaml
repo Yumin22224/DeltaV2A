@@ -11,10 +11,10 @@ data:
   # Optional split manifest from scripts/build_audio_splits.py (JSONL).
   # If set, this takes precedence over audio_list/audio_dir.
   audio_split_manifest: "data/original/splits/manifest.jsonl"
-  audio_split: "train"  # one of: train | val | test
+  audio_split: "train" # one of: train | val | test
   image_dir: "data/original/images"
-  max_audio_files: null  # null = use all
-  max_image_files: null  # null = use all
+  max_audio_files: null # null = use all
+  max_image_files: null # null = use all
   # Augmented artifacts produced during inverse-mapping DB build
   save_augmented_audio: true
   augmented_audio_dir: "data/augmented/pipeline/audio"
@@ -32,8 +32,8 @@ model:
 
 # === Phase A-1: Vocabulary ===
 vocab:
-  img_terms: null  # null = use default IMG_VOCAB_TERMS
-  aud_terms: null  # null = use default AUD_VOCAB_TERMS
+  img_terms: null # null = use default IMG_VOCAB_TERMS
+  aud_terms: null # null = use default AUD_VOCAB_TERMS
 
 # === Phase A-2: Inverse Mapping Database (Music / Controller) ===
 inverse_mapping:
@@ -56,10 +56,19 @@ inverse_mapping:
 # === Phase A-3: Inverse Mapping Database (Image / Siamese) ===
 image_inverse_mapping:
   augmentations_per_image: 2
-  effect_types: ["adaptive_blur", "motion_blur", "adaptive_sharpen", "add_noise", "spread", "sepia_tone", "solarize"]
+  effect_types:
+    [
+      "adaptive_blur",
+      "motion_blur",
+      "adaptive_sharpen",
+      "add_noise",
+      "spread",
+      "sepia_tone",
+      "solarize",
+    ]
   intensities: ["low", "mid", "high"]
   seed: 42
-  save_augmented_images: true
+  save_augmented_images: false
   augmented_image_dir: "data/augmented/pipeline/images"
 
 # === Pedalboard Effects ===
@@ -83,24 +92,27 @@ controller:
   val_split: 0.2
   post_train_analysis:
     enabled: true
-    out_dir: null  # null -> outputs/pipeline/controller/analysis
-    val_split: null  # null -> reuse controller.val_split
+    out_dir: null # null -> outputs/pipeline/controller/analysis
+    val_split: null # null -> reuse controller.val_split
     split_seed: 42
     batch_size: 128
     num_renders: 5
-    sample_rate: null  # null -> reuse model.clap.sample_rate
-    max_duration: null  # null -> reuse model.clap.max_duration
-    device: null  # null -> reuse global device
-    manifest_path: null  # null -> data.augmented_audio_dir/manifest.jsonl
-    hidden_dims: null  # null -> reuse controller.hidden_dims
-    dropout: null  # null -> reuse controller.dropout
+    sample_rate: null # null -> reuse model.clap.sample_rate
+    max_duration: null # null -> reuse model.clap.max_duration
+    device: null # null -> reuse global device
+    manifest_path: null # null -> data.augmented_audio_dir/manifest.jsonl
+    hidden_dims: null # null -> reuse controller.hidden_dims
+    dropout: null # null -> reuse controller.dropout
 
 # === Phase C: Visual Encoder ===
 visual_encoder:
+  # true: train/use Siamese visual encoder
+  # false: skip Siamese and use direct CLIP similarity delta Sim(I')-Sim(I)
+  enabled: false
   projection_dim: 768
   dropout: 0.1
   training:
-    enabled: true
+    enabled: false
     batch_size: 32
     num_epochs: 40
     learning_rate: 0.0001

@@ -34,6 +34,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-sec", type=float, default=10.0)
     p.add_argument("--max-sec", type=float, default=15.0)
     p.add_argument("--clips-per-track", type=int, default=2)
+    p.add_argument(
+        "--segmentation-mode",
+        type=str,
+        choices=["random", "uniform"],
+        default="random",
+        help="random: random anchored segments, uniform: equal-length sequential segments.",
+    )
+    p.add_argument(
+        "--uniform-clip-sec",
+        type=float,
+        default=15.0,
+        help="Clip length used when --segmentation-mode uniform.",
+    )
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--clean-genres", action="store_true", help="Remove existing output genre folders before export.")
     p.add_argument("--overwrite", action="store_true", help="Overwrite existing clip files.")
@@ -107,6 +120,29 @@ def choose_segments(
     return segments
 
 
+def choose_uniform_segments(
+    duration_sec: float,
+    min_sec: float,
+    max_sec: float,
+    uniform_clip_sec: float,
+) -> List[Tuple[float, float]]:
+    if duration_sec < min_sec:
+        return []
+    clip_sec = float(uniform_clip_sec)
+    if clip_sec < min_sec or clip_sec > max_sec:
+        raise ValueError(
+            f"--uniform-clip-sec ({clip_sec}) must be within [--min-sec, --max-sec] = [{min_sec}, {max_sec}]"
+        )
+    n = int(duration_sec // clip_sec)
+    if n <= 0:
+        # Fallback for short-but-valid files.
+        clip_len = min(max(duration_sec, min_sec), max_sec)
+        start = max((duration_sec - clip_len) / 2.0, 0.0)
+        return [(start, clip_len)]
+
+    return [(i * clip_sec, clip_sec) for i in range(n)]
+
+
 def export_clip(
     src: Path,
     dst: Path,
@@ -153,6 +189,8 @@ def main() -> None:
         raise ValueError("--min-sec and --max-sec must be > 0")
     if args.min_sec > args.max_sec:
         raise ValueError("--min-sec must be <= --max-sec")
+    if args.uniform_clip_sec <= 0:
+        raise ValueError("--uniform-clip-sec must be > 0")
 
     raw_dir = Path(args.raw_dir)
     output_dir = Path(args.output_dir)
@@ -201,13 +239,21 @@ def main() -> None:
                 total_probe_fail += 1
                 continue
 
-            segments = choose_segments(
-                duration_sec=source_duration,
-                clips_per_track=args.clips_per_track,
-                min_sec=args.min_sec,
-                max_sec=args.max_sec,
-                rng=rng,
-            )
+            if args.segmentation_mode == "uniform":
+                segments = choose_uniform_segments(
+                    duration_sec=source_duration,
+                    min_sec=args.min_sec,
+                    max_sec=args.max_sec,
+                    uniform_clip_sec=args.uniform_clip_sec,
+                )
+            else:
+                segments = choose_segments(
+                    duration_sec=source_duration,
+                    clips_per_track=args.clips_per_track,
+                    min_sec=args.min_sec,
+                    max_sec=args.max_sec,
+                    rng=rng,
+                )
             if not segments:
                 genre_short += 1
                 total_skipped_short += 1
@@ -260,6 +306,8 @@ def main() -> None:
                 "min_sec": args.min_sec,
                 "max_sec": args.max_sec,
                 "clips_per_track": args.clips_per_track,
+                "segmentation_mode": args.segmentation_mode,
+                "uniform_clip_sec": args.uniform_clip_sec,
                 "dry_run": args.dry_run,
                 "totals": {
                     "input_tracks": total_input,

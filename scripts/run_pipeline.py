@@ -4,7 +4,7 @@ DeltaV2A Pipeline Runner (Phase A-C)
 
 Commands:
   precompute    - Phase A: Build vocab + inverse mapping DBs (music/image)
-  train         - Phase B: Train controller + Siamese visual encoder
+  train         - Phase B: Train controller + optional Siamese visual encoder
   infer         - Phase C: Run inference (I, I', A) -> A'
   all           - precompute + train
 
@@ -162,7 +162,7 @@ def get_image_paths(config: dict) -> list:
 # =============================================================================
 
 def run_precompute(config: dict):
-    """Phase A: Build vocab + inverse mapping DBs (music + image)."""
+    """Phase A: Build vocab + inverse mapping DBs (music + optional image)."""
     from src.vocab import StyleVocabulary
     from src.database import build_inverse_mapping_db, build_image_inverse_mapping_db
     from src.effects.pedalboard_effects import get_total_param_count
@@ -172,6 +172,7 @@ def run_precompute(config: dict):
 
     clip, clap = load_embedders(config)
     effect_names = config['effects']['active']
+    use_siamese_visual_encoder = bool(config.get('visual_encoder', {}).get('enabled', True))
 
     # --- Phase A-1: Build Style Vocabularies ---
     print("\n" + "=" * 60)
@@ -221,7 +222,9 @@ def run_precompute(config: dict):
     image_paths = get_image_paths(config)
     print(f"Found {len(image_paths)} image files")
 
-    if not image_paths:
+    if not use_siamese_visual_encoder:
+        print("visual_encoder.enabled=false -> skipping image inverse mapping DB build.")
+    elif not image_paths:
         print("WARNING: No image files found. Skipping image inverse mapping DB.")
     else:
         img_inv_cfg = config.get('image_inverse_mapping', {})
@@ -270,6 +273,7 @@ def run_precompute(config: dict):
         'img_vocab_size': vocab.img_vocab.size,
         'aud_vocab_size': vocab.aud_vocab.size,
         'shared_vocab_axes': True,
+        'use_siamese_visual_encoder': use_siamese_visual_encoder,
     }
     with open(output_dir / 'pipeline_config.json', 'w') as f:
         json.dump(pipeline_config, f, indent=2)
@@ -284,7 +288,7 @@ def run_precompute(config: dict):
 # =============================================================================
 
 def run_train(config: dict):
-    """Phase B: Train controller + Siamese visual encoder."""
+    """Phase B: Train controller + optional Siamese visual encoder."""
     from src.controller import train_controller, run_controller_post_train_analysis
     from src.effects.pedalboard_effects import get_total_param_count
     from src.inference import train_visual_encoder
@@ -301,6 +305,7 @@ def run_train(config: dict):
     ctrl_cfg = config['controller']
     effect_names = config['effects']['active']
     controller_lr = float(ctrl_cfg['learning_rate'])
+    use_siamese_visual_encoder = bool(config.get('visual_encoder', {}).get('enabled', True))
 
     print("\n" + "=" * 60)
     print("PHASE B: TRAIN AUDIO CONTROLLER")
@@ -367,7 +372,11 @@ def run_train(config: dict):
 
     # Phase B-2: Train visual siamese encoder
     ve_cfg = config.get('visual_encoder', {}).get('training', {})
-    if ve_cfg.get('enabled', True):
+    if not use_siamese_visual_encoder:
+        print("\n" + "=" * 60)
+        print("PHASE B-2: VISUAL SIAMESE DISABLED (visual_encoder.enabled=false)")
+        print("=" * 60)
+    elif ve_cfg.get('enabled', True):
         print("\n" + "=" * 60)
         print("PHASE B-2: TRAIN VISUAL SIAMESE ENCODER")
         print("=" * 60)
@@ -425,11 +434,13 @@ def run_infer(config: dict, args):
     clip, clap = load_embedders(config)
 
     print("\nLoading pipeline...")
+    use_siamese_visual_encoder = bool(config.get('visual_encoder', {}).get('enabled', True))
     pipeline = DeltaV2APipeline.load(
         artifacts_dir=str(output_dir),
         clip_embedder=clip,
         clap_embedder=clap,
         device=config.get('device', 'cpu'),
+        use_siamese_visual_encoder=use_siamese_visual_encoder,
     )
 
     print("\nRunning inference...")
@@ -479,6 +490,17 @@ def main():
         help="Command to run",
     )
     parser.add_argument('--config', type=str, default='configs/pipeline.yaml')
+    parser.add_argument(
+        '--device',
+        type=str,
+        choices=['cpu', 'mps', 'cuda'],
+        help="Optional device override without editing config file.",
+    )
+    parser.add_argument(
+        '--augmentations-per-audio',
+        type=int,
+        help="Optional override for inverse_mapping.augmentations_per_audio.",
+    )
 
     # Inference-specific args
     parser.add_argument('--original', type=str, help="Original image path (infer)")
@@ -493,6 +515,14 @@ def main():
     except FileNotFoundError:
         print(f"ERROR: Config not found: {args.config}")
         sys.exit(1)
+
+    if args.device is not None:
+        config['device'] = args.device
+        print(f"Overriding device from CLI: {args.device}")
+    if args.augmentations_per_audio is not None:
+        config.setdefault('inverse_mapping', {})
+        config['inverse_mapping']['augmentations_per_audio'] = int(args.augmentations_per_audio)
+        print(f"Overriding augmentations_per_audio from CLI: {args.augmentations_per_audio}")
 
     try:
         if args.command == 'precompute':

@@ -4,8 +4,10 @@ DeltaV2A Inference Pipeline (Phase C)
 End-to-end: (I, I', A) -> A'
 
 Steps:
-    1. Visual Encoding: (I, I') -> z_visual
-    2. Style Retrieval: z_visual vs IMG_VOCAB -> top-k with sim scores
+    1. Visual style extraction:
+       - siamese mode: (I, I') -> z_visual
+       - direct mode: Sim(I', IMG_VOCAB) - Sim(I, IMG_VOCAB)
+    2. Style Retrieval: top-k with sim/delta scores
     3. Cross-Modal Mapping: identity transfer (shared IMG/AUD vocab axes)
     4. Audio Controller: CLAP(A) + audio_style -> predicted params
     5. Rendering: pedalboard applies params -> A'
@@ -41,7 +43,8 @@ class DeltaV2APipeline:
 
     def __init__(
         self,
-        visual_encoder: VisualEncoder,
+        clip_embedder,
+        visual_encoder: Optional[VisualEncoder],
         style_vocab: StyleVocabulary,
         controller: AudioController,
         clap_embedder,
@@ -49,8 +52,10 @@ class DeltaV2APipeline:
         sample_rate: int = 48000,
         top_k: int = 5,
         device: str = "cpu",
+        use_siamese_visual_encoder: bool = True,
         use_clip_delta_fallback: bool = False,
     ):
+        self.clip = clip_embedder
         self.visual_encoder = visual_encoder
         self.style_vocab = style_vocab
         self.controller = controller
@@ -59,10 +64,12 @@ class DeltaV2APipeline:
         self.sample_rate = sample_rate
         self.top_k = top_k
         self.device = device
+        self.use_siamese_visual_encoder = use_siamese_visual_encoder
         self.use_clip_delta_fallback = use_clip_delta_fallback
         self.renderer = PedalboardRenderer(sample_rate=sample_rate)
 
-        self.visual_encoder.to(device).eval()
+        if self.visual_encoder is not None:
+            self.visual_encoder.to(device).eval()
         self.controller.to(device).eval()
 
     @classmethod
@@ -72,6 +79,7 @@ class DeltaV2APipeline:
         clip_embedder,
         clap_embedder,
         device: str = "cpu",
+        use_siamese_visual_encoder: Optional[bool] = None,
     ) -> 'DeltaV2APipeline':
         """Load pipeline from saved artifacts directory."""
         import json
@@ -86,21 +94,32 @@ class DeltaV2APipeline:
         top_k = config.get('top_k', 5)
         sample_rate = config.get('sample_rate', 48000)
         projection_dim = config.get('projection_dim', 768)
+        artifact_mode = bool(config.get('use_siamese_visual_encoder', True))
+        if use_siamese_visual_encoder is None:
+            use_siamese_visual_encoder = artifact_mode
+        elif bool(use_siamese_visual_encoder) != artifact_mode:
+            print(
+                "Warning: Config mode and artifact mode differ for visual_encoder.enabled; "
+                f"using config value ({bool(use_siamese_visual_encoder)})."
+            )
 
         # Load vocabularies
         style_vocab = StyleVocabulary()
         style_vocab.load(str(artifacts))
 
-        # Load visual encoder (optional checkpoint)
-        visual_encoder = VisualEncoder(clip_embedder=clip_embedder, projection_dim=projection_dim)
-        ve_ckpt_path = artifacts / 'visual_encoder.pt'
-        use_clip_delta_fallback = True
-        if ve_ckpt_path.exists():
-            ve_ckpt = torch.load(ve_ckpt_path, map_location=device, weights_only=True)
-            visual_encoder.load_state_dict(ve_ckpt['model_state_dict'])
-            use_clip_delta_fallback = False
-        else:
-            print(f"Warning: visual encoder checkpoint not found: {ve_ckpt_path}. Using CLIP-delta fallback.")
+        # Load visual encoder (only for siamese mode)
+        visual_encoder = None
+        use_clip_delta_fallback = False
+        if use_siamese_visual_encoder:
+            visual_encoder = VisualEncoder(clip_embedder=clip_embedder, projection_dim=projection_dim)
+            ve_ckpt_path = artifacts / 'visual_encoder.pt'
+            use_clip_delta_fallback = True
+            if ve_ckpt_path.exists():
+                ve_ckpt = torch.load(ve_ckpt_path, map_location=device, weights_only=True)
+                visual_encoder.load_state_dict(ve_ckpt['model_state_dict'])
+                use_clip_delta_fallback = False
+            else:
+                print(f"Warning: visual encoder checkpoint not found: {ve_ckpt_path}. Using CLIP-delta fallback.")
 
         # Load controller
         total_params = get_total_param_count(effect_names)
@@ -123,6 +142,7 @@ class DeltaV2APipeline:
         controller.load_state_dict(ctrl_ckpt['model_state_dict'])
 
         return cls(
+            clip_embedder=clip_embedder,
             visual_encoder=visual_encoder,
             style_vocab=style_vocab,
             controller=controller,
@@ -131,6 +151,7 @@ class DeltaV2APipeline:
             sample_rate=sample_rate,
             top_k=top_k,
             device=device,
+            use_siamese_visual_encoder=bool(use_siamese_visual_encoder),
             use_clip_delta_fallback=use_clip_delta_fallback,
         )
 
@@ -155,35 +176,63 @@ class DeltaV2APipeline:
         original_image = original_image.to(self.device)
         edited_image = edited_image.to(self.device)
 
-        # Step 1: Visual Encoding
-        if self.use_clip_delta_fallback:
-            clip_orig = self.visual_encoder.clip.embed_images(original_image)
-            clip_edit = self.visual_encoder.clip.embed_images(edited_image)
+        clip_orig = self.clip.embed_images(original_image)
+        clip_edit = self.clip.embed_images(edited_image)
+
+        # Step 1: Visual Encoding / direct style delta
+        if not self.use_siamese_visual_encoder:
+            # Direct mode: use vocab-space delta Sim(I') - Sim(I)
+            clip_orig = clip_orig / (clip_orig.norm(dim=-1, keepdim=True) + 1e-8)
+            clip_edit = clip_edit / (clip_edit.norm(dim=-1, keepdim=True) + 1e-8)
             z_visual = clip_edit - clip_orig
             z_visual = z_visual / (z_visual.norm(dim=-1, keepdim=True) + 1e-8)
+
+            z_visual_np = z_visual[0].cpu().numpy()
+            img_embeddings = self.style_vocab.img_vocab.embeddings
+            sim_orig = img_embeddings @ clip_orig[0].cpu().numpy()
+            sim_edit = img_embeddings @ clip_edit[0].cpu().numpy()
+            img_delta = (sim_edit - sim_orig).astype(np.float32)
+            top_k_indices = np.argsort(img_delta)[-self.top_k:][::-1]
+            top_k_terms = [self.style_vocab.img_vocab.terms[i] for i in top_k_indices]
+            top_k_scores = [float(img_delta[i]) for i in top_k_indices]
+
+            img_style_scores = np.maximum(img_delta, 0.0)
+            total = float(img_style_scores.sum())
+            if total > 0:
+                img_style_scores = img_style_scores / total
+            else:
+                img_style_scores = np.ones_like(img_style_scores, dtype=np.float32) / max(
+                    len(img_style_scores), 1
+                )
         else:
-            z_visual = self.visual_encoder(original_image, edited_image)
-        z_visual_np = z_visual[0].cpu().numpy()
+            if self.use_clip_delta_fallback:
+                z_visual = clip_edit - clip_orig
+                z_visual = z_visual / (z_visual.norm(dim=-1, keepdim=True) + 1e-8)
+            else:
+                if self.visual_encoder is None:
+                    raise RuntimeError("visual_encoder is required when use_siamese_visual_encoder=True")
+                z_visual = self.visual_encoder(original_image, edited_image)
+            z_visual_np = z_visual[0].cpu().numpy()
 
-        # Step 2: Style Retrieval
-        img_embeddings = self.style_vocab.img_vocab.embeddings
-        if z_visual_np.shape[0] != img_embeddings.shape[1]:
-            raise ValueError(
-                f"Visual embedding dim ({z_visual_np.shape[0]}) must match IMG_VOCAB dim ({img_embeddings.shape[1]})."
-            )
-        img_sims = img_embeddings @ z_visual_np
-        top_k_indices = np.argsort(img_sims)[-self.top_k:][::-1]
+            # Step 2: Style Retrieval
+            img_embeddings = self.style_vocab.img_vocab.embeddings
+            if z_visual_np.shape[0] != img_embeddings.shape[1]:
+                raise ValueError(
+                    f"Visual embedding dim ({z_visual_np.shape[0]}) must match IMG_VOCAB dim ({img_embeddings.shape[1]})."
+                )
+            img_sims = img_embeddings @ z_visual_np
+            top_k_indices = np.argsort(img_sims)[-self.top_k:][::-1]
 
-        img_style_scores = np.zeros(self.style_vocab.img_vocab.size, dtype=np.float32)
-        for idx in top_k_indices:
-            img_style_scores[idx] = max(img_sims[idx], 0.0)
+            img_style_scores = np.zeros(self.style_vocab.img_vocab.size, dtype=np.float32)
+            for idx in top_k_indices:
+                img_style_scores[idx] = max(img_sims[idx], 0.0)
 
-        total = img_style_scores.sum()
-        if total > 0:
-            img_style_scores /= total
+            total = img_style_scores.sum()
+            if total > 0:
+                img_style_scores /= total
 
-        top_k_terms = [self.style_vocab.img_vocab.terms[i] for i in top_k_indices]
-        top_k_scores = [float(img_sims[i]) for i in top_k_indices]
+            top_k_terms = [self.style_vocab.img_vocab.terms[i] for i in top_k_indices]
+            top_k_scores = [float(img_sims[i]) for i in top_k_indices]
 
         # Step 3: Cross-Modal Mapping (identity over shared axes)
         if self.style_vocab.img_vocab.size != self.style_vocab.aud_vocab.size:
