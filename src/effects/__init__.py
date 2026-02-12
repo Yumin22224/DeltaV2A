@@ -1,6 +1,6 @@
-"""Effects modules for image and audio transformations."""
+"""Shared effects modules for the core pipeline."""
 
-from . import image_effects
-from . import audio_effects
+from . import pedalboard_effects
+from . import wand_image_effects
 
-__all__ = ["image_effects", "audio_effects", "pedalboard_effects"]
+__all__ = ["pedalboard_effects", "wand_image_effects"]

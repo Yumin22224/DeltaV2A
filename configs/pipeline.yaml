@@ -4,9 +4,20 @@ device: "mps"
 
 # === Data ===
 data:
-  audio_dir: "data/experiment/audio"
-  image_dir: "data/experiment/images"
+  # Source (original, non-augmented) data used for training/inference
+  audio_dir: "data/original/audio"
+  # Optional explicit list (one path per line). If set, this takes precedence over audio_dir.
+  audio_list: null
+  # Optional split manifest from scripts/build_audio_splits.py (JSONL).
+  # If set, this takes precedence over audio_list/audio_dir.
+  audio_split_manifest: "data/original/splits/manifest.jsonl"
+  audio_split: "train"  # one of: train | val | test
+  image_dir: "data/original/images"
   max_audio_files: null  # null = use all
+  max_image_files: null  # null = use all
+  # Augmented artifacts produced during inverse-mapping DB build
+  save_augmented_audio: true
+  augmented_audio_dir: "data/augmented/pipeline/audio"
 
 # === Models ===
 model:
@@ -33,14 +44,29 @@ inverse_mapping:
   augmentations_per_audio: 10
   temperature: 0.1
   seed: 42
+  min_active_effects: 1
+  max_active_effects: 2
+  # Weighted effect sampling for active-effect selection in Phase A-3.
+  # Higher value -> selected more frequently.
+  effect_sampling_weights:
+    lowpass: 1.0
+    bitcrush: 2.0
+    reverb: 1.0
+    highpass: 1.0
+    distortion: 1.0
+    phaser: 2.5
+    delay: 1.0
 
 # === Pedalboard Effects ===
 effects:
   active:
     - lowpass
-    - highshelf
-    - distortion
+    - bitcrush
     - reverb
+    - highpass
+    - distortion
+    - phaser
+    - delay
 
 # === Phase B: Controller Training ===
 controller:
@@ -48,13 +74,43 @@ controller:
   dropout: 0.1
   batch_size: 64
   num_epochs: 100
-  learning_rate: 1e-4
+  learning_rate: 0.0001
   val_split: 0.2
+  post_train_analysis:
+    enabled: true
+    out_dir: null  # null -> outputs/pipeline/controller/analysis
+    val_split: null  # null -> reuse controller.val_split
+    split_seed: 42
+    batch_size: 128
+    num_renders: 5
+    sample_rate: null  # null -> reuse model.clap.sample_rate
+    max_duration: null  # null -> reuse model.clap.max_duration
+    device: null  # null -> reuse global device
+    manifest_path: null  # null -> data.augmented_audio_dir/manifest.jsonl
+    hidden_dims: null  # null -> reuse controller.hidden_dims
+    dropout: null  # null -> reuse controller.dropout
 
 # === Phase C: Visual Encoder ===
 visual_encoder:
   projection_dim: 768
   dropout: 0.1
+  training:
+    enabled: true
+    batch_size: 32
+    num_epochs: 40
+    learning_rate: 0.0001
+    val_split: 0.2
+    augmentations_per_image: 2
+    effect_types: ["adaptive_blur", "motion_blur", "adaptive_sharpen", "add_noise", "spread", "sepia_tone", "solarize"]
+    intensities: ["low", "mid", "high"]
+    style_temperature: 0.07
+    contrastive_margin: 0.3
+    loss_weight_align: 1.0
+    loss_weight_style: 0.5
+    loss_weight_contrastive: 0.2
+    seed: 42
+    save_augmented_images: true
+    augmented_image_dir: "data/augmented/pipeline/images"
 
 # === Phase C: Inference ===
 inference:

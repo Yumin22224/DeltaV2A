@@ -9,7 +9,7 @@ Siamese architecture for visual delta encoding:
     5. Projection layer -> (projection_dim,)
     6. L2 normalize -> z_visual
 
-Self-supervised contrastive learning is a placeholder for now.
+Training is provided in src/inference/siamese_training.py.
 """
 
 import torch
@@ -103,11 +103,14 @@ class VisualEncoder(nn.Module):
         edited_path: str,
     ) -> np.ndarray:
         """Convenience: encode single image pair from file paths."""
+        import torchvision.transforms.functional as TF
+
         orig_img = Image.open(original_path).convert("RGB")
         edit_img = Image.open(edited_path).convert("RGB")
 
-        orig_tensor = self.clip.preprocess(orig_img).unsqueeze(0)
-        edit_tensor = self.clip.preprocess(edit_img).unsqueeze(0)
+        # Keep [0,1] tensors; normalization is handled in CLIPEmbedder.embed_images().
+        orig_tensor = TF.to_tensor(orig_img).unsqueeze(0)
+        edit_tensor = TF.to_tensor(edit_img).unsqueeze(0)
 
         device = next(self.projection.parameters()).device
         orig_tensor = orig_tensor.to(device)

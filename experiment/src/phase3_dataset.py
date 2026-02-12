@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 from torch.utils.data import Dataset
 
-from src.effects.audio_effects import (
+from experiment.src.effects.audio_effects import (
     apply_lpf,
     apply_highshelf,
     apply_saturation,

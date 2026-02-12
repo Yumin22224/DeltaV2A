@@ -3,7 +3,7 @@
 
 # Data configuration
 data:
-  root_dir: "data/experiment"
+  root_dir: "data/original"
   image_subdir: "images"   # Landscape images organized by category
   audio_subdir: "audio"    # Electronic music clips
   max_images: 1000
@@ -19,7 +19,7 @@ data:
 
   # Save augmented files (images/audio with effects applied)
   save_augmented: true  # Set to true to save augmented data
-  augmented_dir: "outputs/augmented"  # Where to save augmented files
+  augmented_dir: "experiment/outputs/augmented"  # Where to save augmented files
 
 # Model configuration
 model:
@@ -88,7 +88,7 @@ phase3:
 
 # Output
 output:
-  dir: "outputs/experiment"
+  dir: "experiment/outputs"
   save_plots: true
   plot_format: "png"
 

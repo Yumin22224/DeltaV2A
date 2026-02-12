@@ -7,22 +7,22 @@ Supports image-image, audio-audio, and cross-modal (image↔audio) comparison wi
 
 Usage:
     # Image-image similarity (category-level + pairwise)
-    python scripts/check_similarity.py --images data/experiment/images/
+    python experiment/scripts/check_similarity.py --images data/original/images/
 
     # Audio-audio similarity
-    python scripts/check_similarity.py --audio data/experiment/audio/
+    python experiment/scripts/check_similarity.py --audio data/original/audio/
 
     # Cross-modal (image ↔ audio)
-    python scripts/check_similarity.py --images data/experiment/images/ --audio data/experiment/audio/
+    python experiment/scripts/check_similarity.py --images data/original/images/ --audio data/original/audio/
 
     # Specific files only
-    python scripts/check_similarity.py --files img1.jpg img2.jpg audio1.wav
+    python experiment/scripts/check_similarity.py --files img1.jpg img2.jpg audio1.wav
 
     # Category-level only (faster for large datasets)
-    python scripts/check_similarity.py --images data/experiment/images/ --mode category
+    python experiment/scripts/check_similarity.py --images data/original/images/ --mode category
 
     # Save heatmap
-    python scripts/check_similarity.py --images data/experiment/images/ --save heatmap.png
+    python experiment/scripts/check_similarity.py --images data/original/images/ --save heatmap.png
 """
 
 import argparse

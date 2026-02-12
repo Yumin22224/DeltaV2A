@@ -15,15 +15,15 @@ Commands:
 
 Usage:
     # Full pipeline
-    python scripts/run_experiment.py all --config configs/experiment.yaml
+    python experiment/scripts/run_experiment.py all --config experiment/configs/experiment.yaml
 
     # Individual stages
-    python scripts/run_experiment.py extract --config configs/experiment.yaml
-    python scripts/run_experiment.py sensitivity --config configs/experiment.yaml
-    python scripts/run_experiment.py linearity --config configs/experiment.yaml
-    python scripts/run_experiment.py fit_alignment --config configs/experiment.yaml
-    python scripts/run_experiment.py phase1 --config configs/experiment.yaml
-    python scripts/run_experiment.py phase3 --config configs/experiment.yaml
+    python experiment/scripts/run_experiment.py extract --config experiment/configs/experiment.yaml
+    python experiment/scripts/run_experiment.py sensitivity --config experiment/configs/experiment.yaml
+    python experiment/scripts/run_experiment.py linearity --config experiment/configs/experiment.yaml
+    python experiment/scripts/run_experiment.py fit_alignment --config experiment/configs/experiment.yaml
+    python experiment/scripts/run_experiment.py phase1 --config experiment/configs/experiment.yaml
+    python experiment/scripts/run_experiment.py phase3 --config experiment/configs/experiment.yaml
 """
 
 import argparse
@@ -42,17 +42,15 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 from src.models import CLIPEmbedder, MultimodalEmbedder, CCAAlignment
 
 # Experiment imports
-from src.experiment.delta_extraction import DeltaExtractor, DeltaDataset
-from src.experiment.sensitivity import sensitivity_check, print_sensitivity_report, get_insensitive_effects
-from src.experiment.linearity import (
+from experiment.src.delta_extraction import DeltaExtractor, DeltaDataset
+from experiment.src.sensitivity import sensitivity_check, print_sensitivity_report, get_insensitive_effects
+from experiment.src.linearity import (
     linearity_analysis,
     cross_category_variance_check,
     print_linearity_report,
     get_inconsistent_effects,
 )
-from src.experiment.discovery import run_discovery
-from src.experiment.phase3_dataset import load_phase3_dataset
-from src.experiment.phase3_training import run_phase3_training
+from experiment.src.discovery import run_discovery
 
 
 # =============================================================================
@@ -233,7 +231,7 @@ def extract_deltas(config: dict):
 
     # Check if augmented files should be saved
     save_augmented = config['data'].get('save_augmented', False)
-    augmented_dir = config['data'].get('augmented_dir', 'outputs/augmented') if save_augmented else None
+    augmented_dir = config['data'].get('augmented_dir', 'experiment/outputs/augmented') if save_augmented else None
 
     if save_augmented:
         print(f"\n⚠️  Augmented files will be saved to: {augmented_dir}")
@@ -590,6 +588,10 @@ def run_phase1(config: dict):
 
 def run_phase3(config: dict):
     """Phase 3: Learning (The Decoder)."""
+    # Import lazily so non-phase3 commands can run even if decoder deps are missing.
+    from experiment.src.phase3_dataset import load_phase3_dataset
+    from experiment.src.phase3_training import run_phase3_training
+
     output_dir = Path(config['output']['dir'])
 
     # Check discovery results exist
@@ -689,8 +691,8 @@ def main():
     parser.add_argument(
         '--config',
         type=str,
-        default='configs/experiment.yaml',
-        help="Path to configuration file (default: configs/experiment.yaml)",
+        default='experiment/configs/experiment.yaml',
+        help="Path to configuration file (default: experiment/configs/experiment.yaml)",
     )
 
     args = parser.parse_args()

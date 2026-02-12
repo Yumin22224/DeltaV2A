@@ -12,8 +12,8 @@ from dataclasses import dataclass, field
 from PIL import Image
 import torchaudio
 
-from ..models.multimodal_embedder import MultimodalEmbedder
-from ..effects import image_effects, audio_effects
+from src.models.multimodal_embedder import MultimodalEmbedder
+from .effects import image_effects, audio_effects
 
 
 @dataclass

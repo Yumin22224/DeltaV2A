@@ -3,7 +3,7 @@ Pedalboard Audio Effects with Continuous Parameters
 
 Wraps Spotify's pedalboard library for continuous-parameter DSP.
 Used in the new pipeline (Phase A-C). Legacy torchaudio effects
-remain in audio_effects.py for the experiment module.
+for the experiment module are in experiment/src/effects/audio_effects.py.
 """
 
 import numpy as np
@@ -41,12 +41,8 @@ EFFECT_CATALOG: Dict[str, EffectSpec] = {
     'lowpass': EffectSpec('lowpass', [
         EffectParamSpec('cutoff_hz', 200.0, 20000.0, 'log'),
     ]),
-    'highshelf': EffectSpec('highshelf', [
-        EffectParamSpec('cutoff_hz', 2000.0, 16000.0, 'log'),
-        EffectParamSpec('gain_db', -12.0, 12.0, 'linear'),
-    ]),
-    'distortion': EffectSpec('distortion', [
-        EffectParamSpec('drive_db', 0.0, 40.0, 'linear'),
+    'bitcrush': EffectSpec('bitcrush', [
+        EffectParamSpec('bit_depth', 4.0, 16.0, 'linear'),
     ]),
     'reverb': EffectSpec('reverb', [
         EffectParamSpec('room_size', 0.0, 1.0, 'linear'),
@@ -54,26 +50,57 @@ EFFECT_CATALOG: Dict[str, EffectSpec] = {
         EffectParamSpec('wet_level', 0.0, 0.8, 'linear'),
         EffectParamSpec('dry_level', 0.2, 1.0, 'linear'),
     ]),
-    'chorus': EffectSpec('chorus', [
-        EffectParamSpec('rate_hz', 0.1, 5.0, 'linear'),
-        EffectParamSpec('depth', 0.0, 1.0, 'linear'),
-        EffectParamSpec('mix', 0.0, 1.0, 'linear'),
+    'highpass': EffectSpec('highpass', [
+        EffectParamSpec('cutoff_hz', 20.0, 6000.0, 'log'),
     ]),
-    'compressor': EffectSpec('compressor', [
-        EffectParamSpec('threshold_db', -60.0, 0.0, 'linear'),
-        EffectParamSpec('ratio', 1.0, 20.0, 'log'),
-        EffectParamSpec('attack_ms', 0.1, 100.0, 'log'),
-        EffectParamSpec('release_ms', 10.0, 1000.0, 'log'),
+    'distortion': EffectSpec('distortion', [
+        EffectParamSpec('drive_db', 0.0, 40.0, 'linear'),
+    ]),
+    'phaser': EffectSpec('phaser', [
+        EffectParamSpec('rate_hz', 0.1, 8.0, 'linear'),
+        EffectParamSpec('depth', 0.0, 1.0, 'linear'),
+        EffectParamSpec('centre_frequency_hz', 300.0, 4000.0, 'log'),
+        EffectParamSpec('feedback', 0.0, 0.9, 'linear'),
+        EffectParamSpec('mix', 0.0, 1.0, 'linear'),
     ]),
     'delay': EffectSpec('delay', [
         EffectParamSpec('delay_seconds', 0.05, 1.0, 'log'),
         EffectParamSpec('feedback', 0.0, 0.8, 'linear'),
         EffectParamSpec('mix', 0.0, 0.7, 'linear'),
     ]),
-    'gain': EffectSpec('gain', [
-        EffectParamSpec('gain_db', -20.0, 20.0, 'linear'),
-    ]),
 }
+
+# Default "bypass-like" values used when an effect is inactive.
+# These are used to encode missing effect params in normalized vectors.
+BYPASS_PARAMS: Dict[str, Dict[str, float]] = {
+    "lowpass": {"cutoff_hz": 20000.0},
+    "bitcrush": {"bit_depth": 16.0},
+    "reverb": {
+        "room_size": 0.0,
+        "damping": 0.0,
+        "wet_level": 0.0,
+        "dry_level": 1.0,
+    },
+    "highpass": {"cutoff_hz": 20.0},
+    "distortion": {"drive_db": 0.0},
+    "phaser": {
+        "rate_hz": 0.1,
+        "depth": 0.0,
+        "centre_frequency_hz": 300.0,
+        "feedback": 0.0,
+        "mix": 0.0,
+    },
+    "delay": {
+        "delay_seconds": 0.05,
+        "feedback": 0.0,
+        "mix": 0.0,
+    },
+}
+
+
+def _default_param_value(effect_name: str, param_name: str, min_val: float) -> float:
+    """Return bypass default for missing params, fallback to min value."""
+    return BYPASS_PARAMS.get(effect_name, {}).get(param_name, min_val)
 
 
 def get_total_param_count(effect_names: List[str] = None) -> int:
@@ -102,7 +129,10 @@ def normalize_params(
         spec = EFFECT_CATALOG[effect_name]
         effect_params = params_dict.get(effect_name, {})
         for ps in spec.params:
-            actual = effect_params.get(ps.name, ps.min_val)
+            # Inactive/missing effect params are encoded at bypass defaults,
+            # not at range minima.
+            default_val = _default_param_value(effect_name, ps.name, ps.min_val)
+            actual = effect_params.get(ps.name, default_val)
             if ps.scale == 'log':
                 log_min = np.log(max(ps.min_val, 1e-10))
                 log_max = np.log(ps.max_val)
@@ -174,13 +204,10 @@ class PedalboardRenderer:
 
         if effect_name == 'lowpass':
             return pb.LowpassFilter(cutoff_frequency_hz=params['cutoff_hz'])
-        elif effect_name == 'highshelf':
-            return pb.HighShelfFilter(
-                cutoff_frequency_hz=params['cutoff_hz'],
-                gain_db=params['gain_db'],
-            )
-        elif effect_name == 'distortion':
-            return pb.Distortion(drive_db=params['drive_db'])
+        elif effect_name == 'bitcrush':
+            bit_depth = int(round(params['bit_depth']))
+            bit_depth = max(1, min(32, bit_depth))
+            return pb.Bitcrush(bit_depth=bit_depth)
         elif effect_name == 'reverb':
             return pb.Reverb(
                 room_size=params['room_size'],
@@ -188,27 +215,33 @@ class PedalboardRenderer:
                 wet_level=params['wet_level'],
                 dry_level=params['dry_level'],
             )
-        elif effect_name == 'chorus':
-            return pb.Chorus(
-                rate_hz=params['rate_hz'],
-                depth=params['depth'],
-                mix=params['mix'],
-            )
-        elif effect_name == 'compressor':
-            return pb.Compressor(
-                threshold_db=params['threshold_db'],
-                ratio=params['ratio'],
-                attack_ms=params['attack_ms'],
-                release_ms=params['release_ms'],
-            )
+        elif effect_name == 'highpass':
+            return pb.HighpassFilter(cutoff_frequency_hz=params['cutoff_hz'])
+        elif effect_name == 'distortion':
+            return pb.Distortion(drive_db=params['drive_db'])
+        elif effect_name == 'phaser':
+            try:
+                return pb.Phaser(
+                    rate_hz=params['rate_hz'],
+                    depth=params['depth'],
+                    centre_frequency_hz=params['centre_frequency_hz'],
+                    feedback=params['feedback'],
+                    mix=params['mix'],
+                )
+            except TypeError:
+                return pb.Phaser(
+                    rate_hz=params['rate_hz'],
+                    depth=params['depth'],
+                    center_frequency_hz=params['centre_frequency_hz'],
+                    feedback=params['feedback'],
+                    mix=params['mix'],
+                )
         elif effect_name == 'delay':
             return pb.Delay(
                 delay_seconds=params['delay_seconds'],
                 feedback=params['feedback'],
                 mix=params['mix'],
             )
-        elif effect_name == 'gain':
-            return pb.Gain(gain_db=params['gain_db'])
         else:
             print(f"Warning: Unknown effect '{effect_name}', skipping")
             return None

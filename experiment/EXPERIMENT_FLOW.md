@@ -5,9 +5,9 @@
 ### 1. `extract` - 델타 임베딩 추출
 
 **입력:**
-- `data/images/**/*.{jpg,png}` - 원본 이미지 파일들
-- `data/audio/**/*.{wav,mp3,flac}` - 원본 오디오 파일들
-- `configs/experiment.yaml` - 설정 파일
+- `data/original/images/**/*.{jpg,png}` - 원본 이미지 파일들
+- `data/original/audio/**/*.{wav,mp3,flac}` - 원본 오디오 파일들
+- `experiment/configs/experiment.yaml` - 설정 파일
 
 **처리:**
 1. CLIP (ViT-L/14) 로드 → 이미지 768차원 임베딩
@@ -20,11 +20,11 @@
      - 델타 계산: `Δe = e_aug - e_orig`
 
 **출력:**
-- `outputs/image_deltas.json` - 이미지 델타 데이터셋
+- `experiment/outputs/image_deltas.json` - 이미지 델타 데이터셋
   - 구조: `[{modality, effect_type, intensity, category, delta, original_embedding, augmented_embedding}, ...]`
   - 개수: N_images × N_effects × N_intensities
   - 예: 100 images × 4 effects × 3 intensities = 1200 deltas
-- `outputs/audio_deltas.json` - 오디오 델타 데이터셋
+- `experiment/outputs/audio_deltas.json` - 오디오 델타 데이터셋
   - 구조: 동일
   - 개수: N_audio × N_effects × N_intensities
 
@@ -33,8 +33,8 @@
 ### 2. `sensitivity` - Phase 0-a: 민감도 검사
 
 **입력:**
-- `outputs/image_deltas.json`
-- `outputs/audio_deltas.json`
+- `experiment/outputs/image_deltas.json`
+- `experiment/outputs/audio_deltas.json`
 - Threshold: `min_distance` (기본 0.01)
 
 **처리:**
@@ -44,7 +44,7 @@
    - 민감도 판정: `mean(||Δe||) > threshold`
 
 **출력:**
-- `outputs/sensitivity_results.json`
+- `experiment/outputs/sensitivity_results.json`
   - 각 조합별 통계량 및 민감도 판정
   - 콘솔: 민감하지 않은 이펙트 경고
 - **의미:** 모델이 해당 이펙트를 감지할 수 있는지 확인
@@ -54,8 +54,8 @@
 ### 3. `linearity` - Phase 0-b: 선형성/일관성 검사
 
 **입력:**
-- `outputs/image_deltas.json`
-- `outputs/audio_deltas.json`
+- `experiment/outputs/image_deltas.json`
+- `experiment/outputs/audio_deltas.json`
 - Thresholds:
   - `min_cosine`: 0.8 (방향 일관성)
   - `max_cv`: 0.3 (크기 일관성)
@@ -73,10 +73,10 @@
    - 판정: `variance < 0.05`
 
 **출력:**
-- `outputs/linearity_results.json`
+- `experiment/outputs/linearity_results.json`
   - 카테고리별 일관성 점수
   - 카테고리 간 분산 점수
-- `outputs/cross_category_variance.json`
+- `experiment/outputs/cross_category_variance.json`
   - 각 이펙트의 컨텍스트 불변성 검증
 - **의미:** 델타가 선형적이고, 소스 카테고리와 무관하게 일관된 방향을 가지는지 확인
 
@@ -87,8 +87,8 @@
 ### 4. `phase1` - Phase 1: 텍스트 앵커 기반 발견
 
 **입력:**
-- `outputs/image_deltas.json`
-- `outputs/audio_deltas.json`
+- `experiment/outputs/image_deltas.json`
+- `experiment/outputs/audio_deltas.json`
 - CLIP/CLAP 모델 (텍스트 임베딩용)
 
 **처리:**
@@ -120,9 +120,9 @@
    - 히트맵 생성: 이미지 이펙트 × 오디오 이펙트
 
 **출력:**
-- `outputs/discovery_matrix.npy` - 3방향 유사도 행렬
-- `outputs/discovery_labels.json` - 이펙트 레이블
-- `outputs/discovery_heatmap.png` - 히트맵 이미지
+- `experiment/outputs/discovery_matrix.npy` - 3방향 유사도 행렬
+- `experiment/outputs/discovery_labels.json` - 이펙트 레이블
+- `experiment/outputs/discovery_heatmap.png` - 히트맵 이미지
 - **의미:** 어떤 이미지 이펙트가 어떤 오디오 이펙트와 대응되는지 발견 (텍스트 기반 검증 포함)
 
 ---
@@ -130,9 +130,9 @@
 ### 5. `phase3` - Phase 3: 학습 (Learning - The Decoder)
 
 **입력:**
-- `outputs/discovery_matrix.npy` - Phase 1에서 발견한 이미지-오디오 이펙트 대응 관계
-- `outputs/discovery_labels.json` - 이펙트 레이블
-- `data/audio/**/*.{wav,mp3,flac}` - 원본 오디오 파일들
+- `experiment/outputs/discovery_matrix.npy` - Phase 1에서 발견한 이미지-오디오 이펙트 대응 관계
+- `experiment/outputs/discovery_labels.json` - 이펙트 레이블
+- `data/original/audio/**/*.{wav,mp3,flac}` - 원본 오디오 파일들
 - Discovery Matrix에서 높은 점수를 받은 대응 쌍 (예: blur ↔ lpf, brightness ↔ highshelf)
 
 **처리:**
@@ -161,9 +161,9 @@
    - **Validation:** 예측 파라미터로 증강 후 스펙트로그램 비교
 
 **출력:**
-- `outputs/decoder_model.pt` - 학습된 Decoder 모델
-- `outputs/training_log.json` - 학습 로그 (loss, validation metrics)
-- `outputs/parameter_predictions/` - 검증 샘플의 예측 파라미터
+- `experiment/outputs/decoder_model.pt` - 학습된 Decoder 모델
+- `experiment/outputs/training_log.json` - 학습 로그 (loss, validation metrics)
+- `experiment/outputs/parameter_predictions/` - 검증 샘플의 예측 파라미터
 - **의미:** 이미지 이펙트 설명($E_{cond}$)을 받아서 대응하는 오디오 DSP 파라미터를 예측할 수 있는 모델
 
 ---
@@ -200,7 +200,7 @@ extract → sensitivity → linearity → phase1 → phase3
         [phase3] → decoder_model.pt (Phase 3: Learning - The Decoder)
             ↑
             ├── discovery_matrix (대응 관계)
-            ├── 원본 오디오 (data/audio/)
+            ├── 원본 오디오 (data/original/audio/)
             └── 랜덤 DSP 증강
 ```
 

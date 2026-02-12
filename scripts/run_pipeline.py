@@ -4,7 +4,7 @@ DeltaV2A Pipeline Runner (Phase A-C)
 
 Commands:
   precompute    - Phase A: Build vocab, correspondence matrix, inverse mapping DB
-  train         - Phase B: Train the audio controller
+  train         - Phase B: Train controller + visual siamese encoder
   infer         - Phase C: Run inference (I, I', A) -> A'
   all           - precompute + train
 
@@ -20,6 +20,7 @@ Usage:
 import argparse
 import sys
 import json
+import shutil
 from pathlib import Path
 import yaml
 
@@ -66,16 +67,91 @@ def load_embedders(config: dict):
     return clip, clap
 
 
+def _resolve_data_path(raw_path: str, base_dir: Path) -> Path:
+    p = Path(raw_path)
+    if p.is_absolute():
+        return p
+    candidate = (base_dir / p).resolve()
+    if candidate.exists():
+        return candidate
+    return (Path.cwd() / p).resolve()
+
+
+def _load_audio_paths_from_manifest(manifest_path: Path, split: str) -> list:
+    paths = []
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"audio_split_manifest not found: {manifest_path}")
+    with open(manifest_path, "r") as f:
+        for line in f:
+            row = json.loads(line)
+            if row.get("split") != split:
+                continue
+            rel_or_abs = str(row["path"])
+            resolved = _resolve_data_path(rel_or_abs, manifest_path.parent)
+            paths.append(str(resolved))
+    return paths
+
+
+def _load_audio_paths_from_list(list_path: Path) -> list:
+    paths = []
+    if not list_path.exists():
+        raise FileNotFoundError(f"audio_list not found: {list_path}")
+    with open(list_path, "r") as f:
+        for line in f:
+            text = line.strip()
+            if not text or text.startswith("#"):
+                continue
+            resolved = _resolve_data_path(text, list_path.parent)
+            paths.append(str(resolved))
+    return paths
+
+
 def get_audio_paths(config: dict) -> list:
     """Get audio file paths from config."""
-    audio_dir = Path(config['data']['audio_dir'])
-    extensions = ['.wav', '.mp3', '.flac', '.ogg', '.m4a']
+    data_cfg = config['data']
+    paths: list[str] = []
+
+    manifest = data_cfg.get('audio_split_manifest')
+    if manifest:
+        split = data_cfg.get('audio_split', 'train')
+        manifest_path = _resolve_data_path(manifest, Path.cwd())
+        paths = _load_audio_paths_from_manifest(manifest_path, split)
+        print(f"Loaded {len(paths)} audio files from manifest split '{split}': {manifest_path}")
+    else:
+        audio_list = data_cfg.get('audio_list')
+        if audio_list:
+            list_path = _resolve_data_path(audio_list, Path.cwd())
+            paths = _load_audio_paths_from_list(list_path)
+            print(f"Loaded {len(paths)} audio files from list: {list_path}")
+        else:
+            audio_dir = Path(data_cfg['audio_dir'])
+            extensions = ['.wav', '.mp3', '.flac', '.ogg', '.m4a']
+            discovered = []
+            for ext in extensions:
+                discovered.extend(audio_dir.glob(f'*{ext}'))
+                discovered.extend(audio_dir.glob(f'**/*{ext}'))
+            paths = [str(p.resolve()) for p in sorted(set(discovered))]
+
+    # Keep only existing files from explicit list/manifest to avoid runtime crashes.
+    paths = [p for p in paths if Path(p).exists()]
+    paths = sorted(set(paths))
+
+    max_files = data_cfg.get('max_audio_files')
+    if max_files:
+        paths = paths[:max_files]
+    return paths
+
+
+def get_image_paths(config: dict) -> list:
+    """Get image file paths from config."""
+    image_dir = Path(config['data']['image_dir'])
+    extensions = ['.jpg', '.jpeg', '.png', '.webp', '.bmp']
     paths = []
     for ext in extensions:
-        paths.extend(audio_dir.glob(f'*{ext}'))
-        paths.extend(audio_dir.glob(f'**/*{ext}'))
+        paths.extend(image_dir.glob(f'*{ext}'))
+        paths.extend(image_dir.glob(f'**/*{ext}'))
     paths = sorted(set(str(p) for p in paths))
-    max_files = config['data'].get('max_audio_files')
+    max_files = config['data'].get('max_image_files')
     if max_files:
         paths = paths[:max_files]
     return paths
@@ -89,7 +165,7 @@ def run_precompute(config: dict):
     """Phase A: Build vocab, correspondence matrix, inverse mapping DB."""
     import numpy as np
     from src.vocab import StyleVocabulary
-    from src.correspondence import compute_correspondence_matrix
+    from src.correspondence import compute_correspondence_matrix, save_correspondence_heatmap
     from src.database import build_inverse_mapping_db
     from src.effects.pedalboard_effects import get_total_param_count
 
@@ -121,6 +197,13 @@ def run_precompute(config: dict):
         sbert_model_name=sbert_model,
     )
     corr.save(str(output_dir / "correspondence_matrix.npz"))
+    try:
+        save_correspondence_heatmap(
+            correspondence=corr,
+            output_path=str(output_dir / "correspondence_heatmap.png"),
+        )
+    except Exception as e:
+        print(f"Warning: Failed to save correspondence heatmap: {e}")
 
     # --- Phase A-3: Inverse Mapping Database ---
     print("\n" + "=" * 60)
@@ -146,6 +229,11 @@ def run_precompute(config: dict):
         max_duration=config['model']['clap']['max_duration'],
         temperature=inv_cfg['temperature'],
         seed=inv_cfg['seed'],
+        save_augmented_audio=config['data'].get('save_augmented_audio', True),
+        augmented_audio_dir=config['data'].get('augmented_audio_dir', "data/augmented/pipeline/audio"),
+        min_active_effects=inv_cfg.get('min_active_effects', 1),
+        max_active_effects=inv_cfg.get('max_active_effects'),
+        effect_sampling_weights=inv_cfg.get('effect_sampling_weights'),
     )
 
     # Save pipeline config for inference loading
@@ -171,9 +259,12 @@ def run_precompute(config: dict):
 # =============================================================================
 
 def run_train(config: dict):
-    """Phase B: Train the audio controller."""
-    from src.controller import train_controller
+    """Phase B: Train controller + visual siamese encoder."""
+    from src.controller import train_controller, run_controller_post_train_analysis
     from src.effects.pedalboard_effects import get_total_param_count
+    from src.inference import train_visual_encoder
+    from src.vocab import StyleVocabulary
+    from src.models import CLIPEmbedder
 
     output_dir = Path(config['output']['dir'])
     db_path = output_dir / "inverse_mapping.h5"
@@ -188,6 +279,7 @@ def run_train(config: dict):
 
     ctrl_cfg = config['controller']
     effect_names = config['effects']['active']
+    controller_lr = float(ctrl_cfg['learning_rate'])
 
     print("\n" + "=" * 60)
     print("PHASE B: TRAIN AUDIO CONTROLLER")
@@ -200,12 +292,115 @@ def run_train(config: dict):
         total_params=get_total_param_count(effect_names),
         batch_size=ctrl_cfg['batch_size'],
         num_epochs=ctrl_cfg['num_epochs'],
-        learning_rate=ctrl_cfg['learning_rate'],
+        learning_rate=controller_lr,
         val_split=ctrl_cfg['val_split'],
         hidden_dims=ctrl_cfg.get('hidden_dims'),
         dropout=ctrl_cfg.get('dropout', 0.1),
         device=config.get('device', 'cpu'),
     )
+
+    # Mirror best checkpoint to root for inference loader compatibility.
+    best_ckpt = output_dir / "controller" / "controller_best.pt"
+    if best_ckpt.exists():
+        shutil.copy2(best_ckpt, output_dir / "controller_best.pt")
+
+    # Phase B-1 post-train analysis (pred vs target report + A/B renders)
+    analysis_cfg = ctrl_cfg.get('post_train_analysis', {})
+    if analysis_cfg.get('enabled', True):
+        print("\n" + "=" * 60)
+        print("PHASE B-1: CONTROLLER POST-TRAIN ANALYSIS")
+        print("=" * 60)
+        try:
+            def _pick(name, default):
+                val = analysis_cfg.get(name, None)
+                return default if val is None else val
+
+            manifest_path = analysis_cfg.get('manifest_path')
+            if manifest_path is None:
+                aug_audio_dir = config.get('data', {}).get('augmented_audio_dir')
+                if aug_audio_dir:
+                    manifest_path = str(Path(aug_audio_dir) / "manifest.jsonl")
+
+            analysis_report = run_controller_post_train_analysis(
+                artifacts_dir=str(output_dir),
+                out_dir=_pick('out_dir', None),
+                val_split=float(_pick('val_split', ctrl_cfg.get('val_split', 0.2))),
+                split_seed=int(_pick('split_seed', 42)),
+                batch_size=int(_pick('batch_size', 128)),
+                num_renders=int(_pick('num_renders', 5)),
+                sample_rate=int(_pick('sample_rate', config['model']['clap'].get('sample_rate', 48000))),
+                max_duration=float(_pick('max_duration', config['model']['clap'].get('max_duration', 20.0))),
+                device=str(_pick('device', config.get('device', 'cpu'))),
+                manifest_path=manifest_path,
+                hidden_dims=_pick('hidden_dims', ctrl_cfg.get('hidden_dims', [512, 256, 128])),
+                dropout=float(_pick('dropout', ctrl_cfg.get('dropout', 0.1))),
+            )
+            report_path = Path(analysis_report['val_metrics_summary_json']).parent / "analysis_report.json"
+            print(f"Controller analysis report: {report_path}")
+            print(f"  Best val loss: {analysis_report['curve_summary']['best_val_loss']:.6f}")
+            print(f"  Rendered examples: {analysis_report['num_rendered_examples']}")
+        except Exception as e:
+            print(f"WARNING: Controller post-train analysis failed: {e}")
+
+    # Phase B-2: Train visual siamese encoder
+    ve_cfg = config.get('visual_encoder', {}).get('training', {})
+    if ve_cfg.get('enabled', True):
+        print("\n" + "=" * 60)
+        print("PHASE B-2: TRAIN VISUAL SIAMESE ENCODER")
+        print("=" * 60)
+
+        image_paths = get_image_paths(config)
+        if not image_paths:
+            print("WARNING: No image files found. Skipping visual encoder training.")
+        else:
+            device = config.get('device', 'cpu')
+            clip_cfg = config['model']['clip']
+            clip = CLIPEmbedder(
+                model_name=clip_cfg['name'],
+                pretrained=clip_cfg['pretrained'],
+                device=device,
+            )
+
+            vocab = StyleVocabulary()
+            vocab.load(str(output_dir))
+            if vocab.img_vocab is None:
+                raise RuntimeError("IMG_VOCAB not found. Run precompute first.")
+
+            train_visual_encoder(
+                image_paths=image_paths,
+                clip_embedder=clip,
+                img_vocab_embeddings=vocab.img_vocab.embeddings,
+                save_path=str(output_dir / "visual_encoder.pt"),
+                projection_dim=config['visual_encoder'].get('projection_dim', 768),
+                dropout=config['visual_encoder'].get('dropout', 0.1),
+                batch_size=ve_cfg.get('batch_size', 32),
+                num_epochs=ve_cfg.get('num_epochs', 40),
+                learning_rate=float(ve_cfg.get('learning_rate', 1e-4)),
+                val_split=ve_cfg.get('val_split', 0.2),
+                augmentations_per_image=ve_cfg.get('augmentations_per_image', 2),
+                effect_types=ve_cfg.get(
+                    'effect_types',
+                    [
+                        "adaptive_blur",
+                        "motion_blur",
+                        "adaptive_sharpen",
+                        "add_noise",
+                        "spread",
+                        "sepia_tone",
+                        "solarize",
+                    ],
+                ),
+                intensities=ve_cfg.get('intensities', ["low", "mid", "high"]),
+                save_augmented=ve_cfg.get('save_augmented_images', False),
+                augmented_dir=ve_cfg.get('augmented_image_dir', "data/augmented/pipeline/images"),
+                style_temperature=ve_cfg.get('style_temperature', 0.07),
+                contrastive_margin=ve_cfg.get('contrastive_margin', 0.3),
+                loss_weight_align=ve_cfg.get('loss_weight_align', 1.0),
+                loss_weight_style=ve_cfg.get('loss_weight_style', 0.5),
+                loss_weight_contrastive=ve_cfg.get('loss_weight_contrastive', 0.2),
+                seed=ve_cfg.get('seed', 42),
+                device=device,
+            )
 
     print("\n" + "=" * 60)
     print("PHASE B COMPLETE")

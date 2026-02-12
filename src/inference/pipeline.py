@@ -51,6 +51,7 @@ class DeltaV2APipeline:
         sample_rate: int = 48000,
         top_k: int = 5,
         device: str = "cpu",
+        use_clip_delta_fallback: bool = False,
     ):
         self.visual_encoder = visual_encoder
         self.style_vocab = style_vocab
@@ -61,6 +62,7 @@ class DeltaV2APipeline:
         self.sample_rate = sample_rate
         self.top_k = top_k
         self.device = device
+        self.use_clip_delta_fallback = use_clip_delta_fallback
         self.renderer = PedalboardRenderer(sample_rate=sample_rate)
 
         self.visual_encoder.to(device).eval()
@@ -95,10 +97,16 @@ class DeltaV2APipeline:
         # Load correspondence matrix
         correspondence = CorrespondenceMatrix.load(str(artifacts / 'correspondence_matrix.npz'))
 
-        # Load visual encoder
+        # Load visual encoder (optional checkpoint)
         visual_encoder = VisualEncoder(clip_embedder=clip_embedder, projection_dim=projection_dim)
-        ve_ckpt = torch.load(artifacts / 'visual_encoder.pt', map_location=device, weights_only=True)
-        visual_encoder.load_state_dict(ve_ckpt['model_state_dict'])
+        ve_ckpt_path = artifacts / 'visual_encoder.pt'
+        use_clip_delta_fallback = True
+        if ve_ckpt_path.exists():
+            ve_ckpt = torch.load(ve_ckpt_path, map_location=device, weights_only=True)
+            visual_encoder.load_state_dict(ve_ckpt['model_state_dict'])
+            use_clip_delta_fallback = False
+        else:
+            print(f"Warning: visual encoder checkpoint not found: {ve_ckpt_path}. Using CLIP-delta fallback.")
 
         # Load controller
         total_params = get_total_param_count(effect_names)
@@ -107,7 +115,17 @@ class DeltaV2APipeline:
             style_vocab_size=style_vocab.aud_vocab.size,
             total_params=total_params,
         )
-        ctrl_ckpt = torch.load(artifacts / 'controller_best.pt', map_location=device, weights_only=True)
+        ctrl_ckpt_path = artifacts / 'controller_best.pt'
+        if not ctrl_ckpt_path.exists():
+            legacy_path = artifacts / 'controller' / 'controller_best.pt'
+            if legacy_path.exists():
+                ctrl_ckpt_path = legacy_path
+        if not ctrl_ckpt_path.exists():
+            raise FileNotFoundError(
+                f"Controller checkpoint not found at {artifacts / 'controller_best.pt'} "
+                f"or {artifacts / 'controller' / 'controller_best.pt'}"
+            )
+        ctrl_ckpt = torch.load(ctrl_ckpt_path, map_location=device, weights_only=True)
         controller.load_state_dict(ctrl_ckpt['model_state_dict'])
 
         return cls(
@@ -120,6 +138,7 @@ class DeltaV2APipeline:
             sample_rate=sample_rate,
             top_k=top_k,
             device=device,
+            use_clip_delta_fallback=use_clip_delta_fallback,
         )
 
     @torch.no_grad()
@@ -144,17 +163,22 @@ class DeltaV2APipeline:
         edited_image = edited_image.to(self.device)
 
         # Step 1: Visual Encoding
-        z_visual = self.visual_encoder(original_image, edited_image)
+        if self.use_clip_delta_fallback:
+            clip_orig = self.visual_encoder.clip.embed_images(original_image)
+            clip_edit = self.visual_encoder.clip.embed_images(edited_image)
+            z_visual = clip_edit - clip_orig
+            z_visual = z_visual / (z_visual.norm(dim=-1, keepdim=True) + 1e-8)
+        else:
+            z_visual = self.visual_encoder(original_image, edited_image)
         z_visual_np = z_visual[0].cpu().numpy()
 
         # Step 2: Style Retrieval
-        # Until contrastive training is done, fall back to CLIP(I') for retrieval
-        clip_edit = self.visual_encoder.clip.embed_images(edited_image)
-        clip_edit_np = clip_edit[0].cpu().numpy()
-        clip_edit_np = clip_edit_np / max(np.linalg.norm(clip_edit_np), 1e-8)
-
         img_embeddings = self.style_vocab.img_vocab.embeddings
-        img_sims = img_embeddings @ clip_edit_np
+        if z_visual_np.shape[0] != img_embeddings.shape[1]:
+            raise ValueError(
+                f"Visual embedding dim ({z_visual_np.shape[0]}) must match IMG_VOCAB dim ({img_embeddings.shape[1]})."
+            )
+        img_sims = img_embeddings @ z_visual_np
         top_k_indices = np.argsort(img_sims)[-self.top_k:][::-1]
 
         img_style_scores = np.zeros(self.style_vocab.img_vocab.size, dtype=np.float32)
@@ -207,12 +231,14 @@ class DeltaV2APipeline:
         from PIL import Image as PILImage
         import librosa
         import soundfile as sf
+        import torchvision.transforms.functional as TF
 
         orig_img = PILImage.open(original_image_path).convert("RGB")
         edit_img = PILImage.open(edited_image_path).convert("RGB")
 
-        orig_tensor = self.visual_encoder.clip.preprocess(orig_img).unsqueeze(0)
-        edit_tensor = self.visual_encoder.clip.preprocess(edit_img).unsqueeze(0)
+        # Keep [0,1] tensors; CLIP normalization happens inside CLIPEmbedder.embed_images().
+        orig_tensor = TF.to_tensor(orig_img).unsqueeze(0)
+        edit_tensor = TF.to_tensor(edit_img).unsqueeze(0)
 
         audio, _ = librosa.load(input_audio_path, sr=self.sample_rate, mono=True)
         result = self.infer(orig_tensor, edit_tensor, audio)

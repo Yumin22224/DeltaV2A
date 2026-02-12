@@ -8,13 +8,13 @@ Image effect (ΔV)와 Audio effect (ΔA) 사이에 semantic correspondence가 �
 
 ```
 DeltaV2A/
-├── configs/
-│   └── experiment.yaml              # 실험 설정
-├── src/
-│   ├── effects/
-│   │   ├── image_effects.py         # 이미지 이펙트 (brightness, contrast, saturation, blur)
-│   │   └── audio_effects.py         # 오디오 이펙트 (lpf, highshelf, saturation, reverb)
-│   ├── experiment/
+├── experiment/
+│   ├── configs/
+│   │   └── experiment.yaml          # 실험 설정
+│   ├── scripts/
+│   │   ├── run_experiment.py        # 실험 실행 스크립트
+│   │   └── check_similarity.py      # CLIP/CLAP 유사도 검사 도구
+│   ├── src/
 │   │   ├── delta_extraction.py      # Delta 추출 (Δe = e(aug) - e(orig))
 │   │   ├── sensitivity.py           # Phase 0-a: 민감도 검사
 │   │   ├── linearity.py             # Phase 0-b: 선형성/일관성 검사
@@ -24,22 +24,24 @@ DeltaV2A/
 │   │   ├── phase3_training.py       # Phase 3: Decoder 학습 루프
 │   │   ├── prototype.py             # 프로토타입 계산 (참고용)
 │   │   ├── retrieval.py             # Retrieval 평가 (참고용)
-│   │   └── statistics.py            # 통계 분석 (참고용)
+│   │   ├── statistics.py            # 통계 분석 (참고용)
+│   │   └── effects/
+│   │       ├── image_effects.py     # 실험용 이미지 이펙트
+│   │       └── audio_effects.py     # 실험용 오디오 이펙트
+│   ├── outputs/                     # 실험 출력
+│   ├── EXPERIMENT_FLOW.md
+│   └── EXPERIMENT_README.md
+├── src/
+│   ├── effects/
+│   │   └── pedalboard_effects.py    # 파이프라인용 오디오 DSP
 │   └── models/
 │       ├── clip_embedder.py         # CLIP (ViT-L/14) 임베딩
 │       ├── clap_embedder.py         # CLAP (630k+audioset) 임베딩
 │       ├── multimodal_embedder.py   # CLIP+CLAP 통합 래퍼
 │       ├── alignment.py             # CCA 정렬
 │       └── decoder.py               # DSP Parameter Decoder (CrossAttention + MLP)
-├── scripts/
-│   ├── run_experiment.py            # 실험 실행 스크립트
-│   ├── check_similarity.py          # CLIP/CLAP 유사도 검사 도구
-│   ├── prepare_data.py              # 데이터 전처리
-│   ├── download_jamendo.py          # MTG-Jamendo 음악 다운로더
-│   ├── download_bandcamp_cc.py      # Bandcamp CC 음악 다운로더
-│   └── prepare_places365_landscape.py  # Places365 랜드스케이프 이미지 필터
 └── data/
-    └── experiment/
+    └── original/
         ├── images/                  # 랜드스케이프 이미지 (카테고리별 폴더)
         └── audio/                   # 전자음악 클립
 ```
@@ -68,21 +70,21 @@ DeltaV2A/
 
 ```bash
 # 전체 파이프라인
-python scripts/run_experiment.py all --config configs/experiment.yaml
+python experiment/scripts/run_experiment.py all --config experiment/configs/experiment.yaml
 
 # 개별 단계
-python scripts/run_experiment.py extract --config configs/experiment.yaml
-python scripts/run_experiment.py sensitivity --config configs/experiment.yaml
-python scripts/run_experiment.py linearity --config configs/experiment.yaml
-python scripts/run_experiment.py phase1 --config configs/experiment.yaml
-python scripts/run_experiment.py phase3 --config configs/experiment.yaml
+python experiment/scripts/run_experiment.py extract --config experiment/configs/experiment.yaml
+python experiment/scripts/run_experiment.py sensitivity --config experiment/configs/experiment.yaml
+python experiment/scripts/run_experiment.py linearity --config experiment/configs/experiment.yaml
+python experiment/scripts/run_experiment.py phase1 --config experiment/configs/experiment.yaml
+python experiment/scripts/run_experiment.py phase3 --config experiment/configs/experiment.yaml
 ```
 
 ---
 
 ## Effect Type Mapping
 
-현재 가설적 매핑 (`configs/experiment.yaml`):
+현재 가설적 매핑 (`experiment/configs/experiment.yaml`):
 
 | Image Effect | Audio Effect | 가설 |
 |--------------|--------------|------|

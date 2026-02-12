@@ -15,7 +15,7 @@ from typing import Dict, Optional, List
 from tqdm import tqdm
 
 from src.models.decoder import DSPParameterDecoder
-from src.experiment.phase3_dataset import Phase3Dataset
+from experiment.src.phase3_dataset import Phase3Dataset
 
 
 class Phase3Trainer:

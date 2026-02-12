@@ -6,7 +6,7 @@ Predicts DSP parameters from audio embedding + target style label.
 Architecture:
     Input: [CLAP(A) (512d), style_label (|AUD_VOCAB|d)] -> concat
     Hidden: MLP with LayerNorm + ReLU + Dropout
-    Output: (total_params,) in [0, 1] via sigmoid
+    Output: (total_params,) in [0, 1] via sigmoid 
 """
 
 import torch
