@@ -326,10 +326,24 @@ def run_train(config: dict):
             dropout=ctrl_cfg.get('dropout', 0.1),
             use_activity_head=bool(ctrl_cfg.get('use_activity_head', False)),
             activity_loss_weight=float(ctrl_cfg.get('activity_loss_weight', 0.0)),
+            activity_mismatch_weight=float(ctrl_cfg.get('activity_mismatch_weight', 0.0)),
+            activity_mismatch_gamma=float(ctrl_cfg.get('activity_mismatch_gamma', 2.0)),
+            activity_loss_type=str(ctrl_cfg.get('activity_loss_type', 'bce')),
+            focal_gamma=float(ctrl_cfg.get('focal_gamma', 2.0)),
+            asl_gamma_pos=float(ctrl_cfg.get('asl_gamma_pos', 0.0)),
+            asl_gamma_neg=float(ctrl_cfg.get('asl_gamma_neg', 4.0)),
+            asl_clip=float(ctrl_cfg.get('asl_clip', 0.05)),
+            param_loss_weight=float(ctrl_cfg.get('param_loss_weight', 1.0)),
             inactive_param_weight=float(ctrl_cfg.get('inactive_param_weight', 1.0)),
             param_loss_type=str(ctrl_cfg.get('param_loss_type', 'mse')),
             huber_delta=float(ctrl_cfg.get('huber_delta', 0.05)),
             effect_loss_weights=ctrl_cfg.get('effect_loss_weights'),
+            selection_metric=str(ctrl_cfg.get('selection_metric', 'val_param_loss')),
+            training_stages=ctrl_cfg.get('training_stages'),
+            balanced_sampler=ctrl_cfg.get('balanced_sampler'),
+            train_backbone=bool(ctrl_cfg.get('train_backbone', True)),
+            train_param_head=bool(ctrl_cfg.get('train_param_head', True)),
+            train_activity_head=bool(ctrl_cfg.get('train_activity_head', True)),
             device=config.get('device', 'cpu'),
         )
 
@@ -337,6 +351,12 @@ def run_train(config: dict):
         best_ckpt = output_dir / "controller" / "controller_best.pt"
         if best_ckpt.exists():
             shutil.copy2(best_ckpt, output_dir / "controller_best.pt")
+        best_activity_ckpt = output_dir / "controller" / "controller_best_activity.pt"
+        if best_activity_ckpt.exists():
+            shutil.copy2(best_activity_ckpt, output_dir / "controller_best_activity.pt")
+        thresholds_json = output_dir / "controller" / "activity_thresholds.json"
+        if thresholds_json.exists():
+            shutil.copy2(thresholds_json, output_dir / "controller_activity_thresholds.json")
 
         # Phase B-1 post-train analysis (pred vs target report + A/B renders)
         analysis_cfg = ctrl_cfg.get('post_train_analysis', {})

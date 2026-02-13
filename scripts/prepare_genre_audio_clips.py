@@ -33,7 +33,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--genres", type=str, default="classical,jazz,pop,rock")
     p.add_argument("--min-sec", type=float, default=10.0)
     p.add_argument("--max-sec", type=float, default=15.0)
-    p.add_argument("--clips-per-track", type=int, default=2)
+    p.add_argument(
+        "--clips-per-track",
+        type=int,
+        default=None,
+        help="Legacy fixed clip count per track. If set, min/max clip args are ignored.",
+    )
+    p.add_argument("--min-clips-per-track", type=int, default=2)
+    p.add_argument("--max-clips-per-track", type=int, default=3)
     p.add_argument(
         "--segmentation-mode",
         type=str,
@@ -92,29 +99,54 @@ def normalize_track_name(stem: str) -> str:
 
 def choose_segments(
     duration_sec: float,
-    clips_per_track: int,
+    min_clips_per_track: int,
+    max_clips_per_track: int,
     min_sec: float,
     max_sec: float,
     rng: random.Random,
 ) -> List[Tuple[float, float]]:
-    if duration_sec < min_sec or clips_per_track <= 0:
+    if duration_sec < min_sec or min_clips_per_track <= 0 or max_clips_per_track <= 0:
         return []
 
     max_possible = max(1, int(duration_sec // min_sec))
-    n_clips = min(clips_per_track, max_possible)
+    lo = max(1, min(min_clips_per_track, max_clips_per_track))
+    hi = max(lo, max(min_clips_per_track, max_clips_per_track))
+    lo = min(lo, max_possible)
+    hi = min(hi, max_possible)
+    if lo > hi:
+        return []
+
+    n_clips = rng.randint(lo, hi)
+
+    # Sample clip lengths with feasibility constraints so clips remain non-overlapping.
+    lengths: List[float] = []
+    budget = float(duration_sec)
+    for i in range(n_clips):
+        remaining = n_clips - i - 1
+        min_remaining = remaining * min_sec
+        len_lo = min_sec
+        len_hi = min(max_sec, budget - min_remaining)
+        if len_hi < len_lo:
+            return []
+        seg_len = rng.uniform(len_lo, len_hi)
+        lengths.append(seg_len)
+        budget -= seg_len
+
+    # Distribute the remaining slack as random gaps (n_clips + 1 buckets).
+    slack = max(duration_sec - sum(lengths), 0.0)
+    gap_weights = [rng.random() for _ in range(n_clips + 1)]
+    wsum = sum(gap_weights)
+    if wsum <= 0:
+        gaps = [0.0 for _ in range(n_clips + 1)]
+    else:
+        gaps = [slack * (w / wsum) for w in gap_weights]
 
     segments: List[Tuple[float, float]] = []
-    for i in range(n_clips):
-        seg_len = rng.uniform(min_sec, max_sec)
-        seg_len = min(seg_len, duration_sec)
-        max_start = max(duration_sec - seg_len, 0.0)
-
-        anchor = (i + 1) / (n_clips + 1)
-        jitter = (rng.random() - 0.5) * 0.15
-        position = min(max(anchor + jitter, 0.0), 1.0)
-        start = max_start * position
-
+    cur = gaps[0]
+    for i, seg_len in enumerate(lengths):
+        start = max(min(cur, duration_sec - seg_len), 0.0)
         segments.append((start, seg_len))
+        cur = start + seg_len + gaps[i + 1]
 
     segments.sort(key=lambda x: x[0])
     return segments
@@ -191,6 +223,12 @@ def main() -> None:
         raise ValueError("--min-sec must be <= --max-sec")
     if args.uniform_clip_sec <= 0:
         raise ValueError("--uniform-clip-sec must be > 0")
+    if args.clips_per_track is not None and args.clips_per_track <= 0:
+        raise ValueError("--clips-per-track must be > 0 when set")
+    if args.min_clips_per_track <= 0 or args.max_clips_per_track <= 0:
+        raise ValueError("--min-clips-per-track and --max-clips-per-track must be > 0")
+    if args.min_clips_per_track > args.max_clips_per_track:
+        raise ValueError("--min-clips-per-track must be <= --max-clips-per-track")
 
     raw_dir = Path(args.raw_dir)
     output_dir = Path(args.output_dir)
@@ -247,9 +285,16 @@ def main() -> None:
                     uniform_clip_sec=args.uniform_clip_sec,
                 )
             else:
+                if args.clips_per_track is not None:
+                    min_cpt = int(args.clips_per_track)
+                    max_cpt = int(args.clips_per_track)
+                else:
+                    min_cpt = int(args.min_clips_per_track)
+                    max_cpt = int(args.max_clips_per_track)
                 segments = choose_segments(
                     duration_sec=source_duration,
-                    clips_per_track=args.clips_per_track,
+                    min_clips_per_track=min_cpt,
+                    max_clips_per_track=max_cpt,
                     min_sec=args.min_sec,
                     max_sec=args.max_sec,
                     rng=rng,
@@ -306,6 +351,8 @@ def main() -> None:
                 "min_sec": args.min_sec,
                 "max_sec": args.max_sec,
                 "clips_per_track": args.clips_per_track,
+                "min_clips_per_track": args.min_clips_per_track,
+                "max_clips_per_track": args.max_clips_per_track,
                 "segmentation_mode": args.segmentation_mode,
                 "uniform_clip_sec": args.uniform_clip_sec,
                 "dry_run": args.dry_run,

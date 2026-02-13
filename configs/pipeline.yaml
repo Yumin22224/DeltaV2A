@@ -37,7 +37,7 @@ vocab:
 
 # === Phase A-2: Inverse Mapping Database (Music / Controller) ===
 inverse_mapping:
-  augmentations_per_audio: 200
+  augmentations_per_audio: 30
   temperature: 0.1
   seed: 42
   min_active_effects: 1
@@ -87,22 +87,75 @@ controller:
   hidden_dims: [1024, 512, 512, 256]
   dropout: 0.2
   use_activity_head: true
-  activity_loss_weight: 5.0
+  activity_loss_weight: 0.8
+  activity_mismatch_weight: 2.0
+  activity_mismatch_gamma: 2.0
+  activity_loss_type: "asl" # one of: bce, focal, asl
+  focal_gamma: 2.0
+  asl_gamma_pos: 0.0
+  asl_gamma_neg: 4.0
+  asl_clip: 0.05
+  param_loss_weight: 1.0
   inactive_param_weight: 0.0
   param_loss_type: "huber" # one of: mse, huber
   huber_delta: 0.02
+  selection_metric: "val_param_loss" # one of: val_loss, val_param_loss, val_active_param_rmse
+  train_backbone: true
+  train_param_head: true
+  train_activity_head: true
+  balanced_sampler:
+    enabled: true
+    effects: ["phaser", "delay"]
+    boost: 3.0
+    base_weight: 1.0
   effect_loss_weights:
     lowpass: 1.0
-    bitcrush: 2.0
+    bitcrush: 1.5
     reverb: 1.0
     highpass: 1.0
     distortion: 1.0
-    phaser: 10.0
-    delay: 10.0
+    phaser: 4.0
+    delay: 4.0
   batch_size: 256
   num_epochs: 100
   learning_rate: 0.0001
   val_split: 0.2
+  training_stages:
+    - name: "stage1_activity_warmup"
+      epochs: 10
+      learning_rate: 0.0001
+      activity_loss_weight: 1.0
+      activity_mismatch_weight: 3.0
+      activity_mismatch_gamma: 2.0
+      activity_loss_type: "asl"
+      param_loss_weight: 0.0
+      train_backbone: true
+      train_param_head: false
+      train_activity_head: true
+      selection_metric: "val_activity_macro_f1"
+    - name: "stage2_joint_main"
+      epochs: 70
+      learning_rate: 0.00008
+      activity_loss_weight: 0.7
+      activity_mismatch_weight: 2.0
+      activity_mismatch_gamma: 2.0
+      activity_loss_type: "asl"
+      param_loss_weight: 1.0
+      train_backbone: true
+      train_param_head: true
+      train_activity_head: true
+      selection_metric: "val_param_loss"
+    - name: "stage3_param_finetune"
+      epochs: 20
+      learning_rate: 0.00003
+      activity_loss_weight: 0.0
+      activity_mismatch_weight: 0.0
+      activity_mismatch_gamma: 2.0
+      param_loss_weight: 1.0
+      train_backbone: true
+      train_param_head: true
+      train_activity_head: false
+      selection_metric: "val_active_param_rmse"
   post_train_analysis:
     enabled: true
     out_dir: null # null -> outputs/pipeline/controller/analysis

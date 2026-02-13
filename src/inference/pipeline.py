@@ -22,7 +22,12 @@ from dataclasses import dataclass
 from .visual_encoder import VisualEncoder
 from ..vocab.style_vocab import StyleVocabulary
 from ..controller.model import AudioController
-from ..effects.pedalboard_effects import PedalboardRenderer, denormalize_params
+from ..effects.pedalboard_effects import (
+    EFFECT_CATALOG,
+    PedalboardRenderer,
+    denormalize_params,
+    normalize_params,
+)
 
 
 @dataclass
@@ -35,6 +40,9 @@ class InferenceResult:
     aud_style_scores: np.ndarray
     predicted_params_normalized: np.ndarray
     predicted_params_dict: Dict[str, Dict[str, float]]
+    predicted_activity_probs: Optional[List[float]] = None
+    predicted_activity_mask: Optional[List[bool]] = None
+    activity_thresholds: Optional[List[float]] = None
     output_audio: Optional[np.ndarray] = None
 
 
@@ -54,6 +62,8 @@ class DeltaV2APipeline:
         device: str = "cpu",
         use_siamese_visual_encoder: bool = True,
         use_clip_delta_fallback: bool = False,
+        activity_thresholds: Optional[np.ndarray] = None,
+        apply_activity_gating: bool = True,
     ):
         self.clip = clip_embedder
         self.visual_encoder = visual_encoder
@@ -66,7 +76,16 @@ class DeltaV2APipeline:
         self.device = device
         self.use_siamese_visual_encoder = use_siamese_visual_encoder
         self.use_clip_delta_fallback = use_clip_delta_fallback
+        self.apply_activity_gating = bool(apply_activity_gating)
         self.renderer = PedalboardRenderer(sample_rate=sample_rate)
+        self.activity_thresholds = activity_thresholds.astype(np.float32) if activity_thresholds is not None else None
+        self._bypass_normalized = normalize_params({}, effect_names)
+        self._effect_param_slices = []
+        start = 0
+        for effect_name in effect_names:
+            width = EFFECT_CATALOG[effect_name].num_params
+            self._effect_param_slices.append(slice(start, start + width))
+            start += width
 
         if self.visual_encoder is not None:
             self.visual_encoder.to(device).eval()
@@ -146,6 +165,22 @@ class DeltaV2APipeline:
         )
         controller.load_state_dict(ctrl_ckpt['model_state_dict'])
 
+        thresholds_arr = None
+        thresholds_path_candidates = [
+            artifacts / "controller" / "activity_thresholds.json",
+            artifacts / "controller_activity_thresholds.json",
+        ]
+        for cand in thresholds_path_candidates:
+            if cand.exists():
+                with open(cand, "r") as f:
+                    payload = json.load(f)
+                thresholds = payload.get("thresholds", {})
+                thresholds_arr = np.array(
+                    [float(thresholds.get(name, 0.5)) for name in effect_names],
+                    dtype=np.float32,
+                )
+                break
+
         return cls(
             clip_embedder=clip_embedder,
             visual_encoder=visual_encoder,
@@ -158,7 +193,24 @@ class DeltaV2APipeline:
             device=device,
             use_siamese_visual_encoder=bool(use_siamese_visual_encoder),
             use_clip_delta_fallback=use_clip_delta_fallback,
+            activity_thresholds=thresholds_arr,
+            apply_activity_gating=True,
         )
+
+    def _gate_params_by_activity(
+        self,
+        params_normalized: np.ndarray,
+        activity_mask: np.ndarray,
+    ) -> np.ndarray:
+        if activity_mask.size == 0:
+            return params_normalized
+        gated = params_normalized.copy()
+        for i, sl in enumerate(self._effect_param_slices):
+            if i >= activity_mask.shape[0]:
+                break
+            if not bool(activity_mask[i]):
+                gated[sl] = self._bypass_normalized[sl]
+        return gated
 
     @torch.no_grad()
     def infer(
@@ -254,8 +306,20 @@ class DeltaV2APipeline:
         clap_emb = self.clap.embed_audio(audio_tensor, self.sample_rate).to(self.device)
 
         style_tensor = torch.from_numpy(aud_style_scores).float().unsqueeze(0).to(self.device)
-        params_pred = self.controller(clap_emb, style_tensor)
+        params_pred, activity_logits = self.controller.forward_with_activity(clap_emb, style_tensor)
         params_normalized = params_pred[0].cpu().numpy()
+        pred_activity_probs: Optional[np.ndarray] = None
+        pred_activity_mask: Optional[np.ndarray] = None
+        threshold_arr: Optional[np.ndarray] = None
+        if activity_logits is not None:
+            pred_activity_probs = torch.sigmoid(activity_logits)[0].cpu().numpy()
+            if self.activity_thresholds is not None and self.activity_thresholds.shape[0] == pred_activity_probs.shape[0]:
+                threshold_arr = self.activity_thresholds
+            else:
+                threshold_arr = np.full(pred_activity_probs.shape[0], 0.5, dtype=np.float32)
+            pred_activity_mask = (pred_activity_probs >= threshold_arr).astype(np.bool_)
+            if self.apply_activity_gating:
+                params_normalized = self._gate_params_by_activity(params_normalized, pred_activity_mask)
         params_dict = denormalize_params(params_normalized, self.effect_names)
 
         # Step 5: Rendering
@@ -269,6 +333,13 @@ class DeltaV2APipeline:
             aud_style_scores=aud_style_scores,
             predicted_params_normalized=params_normalized,
             predicted_params_dict=params_dict,
+            predicted_activity_probs=(
+                pred_activity_probs.tolist() if pred_activity_probs is not None else None
+            ),
+            predicted_activity_mask=(
+                pred_activity_mask.tolist() if pred_activity_mask is not None else None
+            ),
+            activity_thresholds=(threshold_arr.tolist() if threshold_arr is not None else None),
             output_audio=output_audio,
         )
 

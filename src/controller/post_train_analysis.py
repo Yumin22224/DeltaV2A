@@ -110,6 +110,7 @@ def _evaluate_controller(
     hidden_dims: List[int],
     dropout: float,
     device: str,
+    activity_thresholds: Optional[np.ndarray] = None,
 ):
     db = InverseMappingDB(str(db_path))
     dataset = InverseMappingDataset(db)
@@ -141,14 +142,24 @@ def _evaluate_controller(
 
     preds = []
     gts = []
+    activity_probs_all = []
+    activity_pred_all = []
     with torch.no_grad():
         for batch in val_loader:
             clap_emb = batch["clap_embedding"].to(device)
             style = batch["style_label"].to(device)
             gt = batch["normalized_params"].to(device)
-            pred = model(clap_emb, style)
+            pred, activity_logits = model.forward_with_activity(clap_emb, style)
             preds.append(pred.cpu().numpy())
             gts.append(gt.cpu().numpy())
+            if activity_logits is not None:
+                probs = torch.sigmoid(activity_logits).cpu().numpy()
+                if activity_thresholds is not None and activity_thresholds.shape[0] == probs.shape[1]:
+                    thresholds = activity_thresholds[None, :]
+                else:
+                    thresholds = np.full((1, probs.shape[1]), 0.5, dtype=np.float32)
+                activity_probs_all.append(probs)
+                activity_pred_all.append((probs >= thresholds).astype(np.float32))
 
     pred_arr = np.concatenate(preds, axis=0)
     gt_arr = np.concatenate(gts, axis=0)
@@ -188,6 +199,8 @@ def _evaluate_controller(
         "val_indices": list(val_ds.indices),
         "pred_arr": pred_arr,
         "gt_arr": gt_arr,
+        "activity_probs_arr": np.concatenate(activity_probs_all, axis=0) if activity_probs_all else None,
+        "activity_pred_arr": np.concatenate(activity_pred_all, axis=0) if activity_pred_all else None,
         "sample_mae": np.mean(np.abs(err), axis=1),
         "sample_rmse": np.sqrt(np.mean(np.square(err), axis=1)),
     }
@@ -212,6 +225,9 @@ def _render_ab_bundle(
     max_duration: float,
     manifest_map: Dict[int, Dict],
     num_renders: int,
+    activity_probs_arr: Optional[np.ndarray] = None,
+    activity_pred_arr: Optional[np.ndarray] = None,
+    activity_thresholds: Optional[np.ndarray] = None,
 ):
     render_dir = out_dir / "renders"
     render_dir.mkdir(parents=True, exist_ok=True)
@@ -271,6 +287,15 @@ def _render_ab_bundle(
             "target_wav": str(target_path),
             "pred_params": pred_params,
             "target_params": gt_params,
+            "predicted_activity_probs": (
+                activity_probs_arr[local_idx].tolist() if activity_probs_arr is not None else None
+            ),
+            "predicted_activity_mask": (
+                activity_pred_arr[local_idx].astype(bool).tolist() if activity_pred_arr is not None else None
+            ),
+            "activity_thresholds": (
+                activity_thresholds.tolist() if activity_thresholds is not None else None
+            ),
         }
         with meta_path.open("w") as f:
             json.dump(_to_serializable(sample_info), f, indent=2)
@@ -324,11 +349,31 @@ def run_controller_post_train_analysis(
     if not training_log_path.exists():
         raise FileNotFoundError(f"Missing {training_log_path}")
 
+    activity_thresholds = None
+    thresholds_dict = None
+    threshold_candidates = [
+        artifacts / "controller" / "activity_thresholds.json",
+        artifacts / "controller_activity_thresholds.json",
+    ]
+    for cand in threshold_candidates:
+        if cand.exists():
+            with cand.open("r") as f:
+                payload = json.load(f)
+            thresholds = payload.get("thresholds", {})
+            if isinstance(thresholds, dict):
+                thresholds_dict = thresholds
+            break
+
     with pipeline_cfg_path.open("r") as f:
         pipeline_cfg = json.load(f)
 
     effect_names = list(pipeline_cfg["effect_names"])
     style_vocab_size = int(pipeline_cfg["aud_vocab_size"])
+    if thresholds_dict is not None:
+        activity_thresholds = np.array(
+            [float(thresholds_dict.get(name, 0.5)) for name in effect_names],
+            dtype=np.float32,
+        )
 
     loss_plot_path = analysis_dir / "controller_loss_curve.png"
     curve_summary = _plot_loss_curve(training_log_path, loss_plot_path)
@@ -344,6 +389,7 @@ def run_controller_post_train_analysis(
         hidden_dims=hidden_dims,
         dropout=dropout,
         device=device,
+        activity_thresholds=activity_thresholds,
     )
     _save_metrics_csv(eval_out["rows"], analysis_dir / "val_param_metrics.csv")
     with (analysis_dir / "val_metrics_summary.json").open("w") as f:
@@ -365,6 +411,9 @@ def run_controller_post_train_analysis(
         max_duration=max_duration,
         manifest_map=manifest_map,
         num_renders=num_renders,
+        activity_probs_arr=eval_out.get("activity_probs_arr"),
+        activity_pred_arr=eval_out.get("activity_pred_arr"),
+        activity_thresholds=activity_thresholds,
     )
 
     report = {
