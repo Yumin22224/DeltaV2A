@@ -762,25 +762,36 @@ def train_controller(
             print("WARNING: balanced_sampler enabled but effect_names missing in DB. Falling back to shuffle=True.")
         else:
             target_effects = [
-                str(x) for x in balanced_sampler.get("effects", ["phaser", "delay"])
+                str(x) for x in balanced_sampler.get("effects", ["playback_rate", "delay"])
                 if str(x) in effect_names
             ]
             boost = float(balanced_sampler.get("boost", 2.0))
             base_weight = float(balanced_sampler.get("base_weight", 1.0))
+            mode = str(balanced_sampler.get("mode", "count_boost")).strip().lower()
             if target_effects and boost > 0:
                 train_indices = np.array(train_ds.indices, dtype=np.int64)
                 active_mask = dataset.effect_active_mask[train_indices]
                 sample_weights = np.full(train_indices.shape[0], base_weight, dtype=np.float64)
-                for effect_name in target_effects:
-                    effect_idx = effect_names.index(effect_name)
-                    sample_weights += boost * active_mask[:, effect_idx].astype(np.float64)
+                target_idxs = [effect_names.index(effect_name) for effect_name in target_effects]
+                target_active = active_mask[:, target_idxs].astype(np.float64)
+                if mode == "inverse_frequency":
+                    # Reweight samples by inverse effect frequency so rare effects are sampled more.
+                    freq = np.clip(target_active.mean(axis=0), 1e-8, 1.0)
+                    inv_freq = (1.0 / freq)
+                    inv_freq = inv_freq / np.mean(inv_freq)
+                    sample_scores = (target_active * inv_freq[None, :]).mean(axis=1)
+                    sample_weights += boost * sample_scores
+                else:
+                    for effect_name in target_effects:
+                        effect_idx = effect_names.index(effect_name)
+                        sample_weights += boost * active_mask[:, effect_idx].astype(np.float64)
                 train_sampler = WeightedRandomSampler(
                     weights=torch.from_numpy(sample_weights),
                     num_samples=int(sample_weights.shape[0]),
                     replacement=True,
                 )
                 print(
-                    f"Using balanced sampler: effects={target_effects}, "
+                    f"Using balanced sampler: mode={mode}, effects={target_effects}, "
                     f"boost={boost}, base_weight={base_weight}"
                 )
 

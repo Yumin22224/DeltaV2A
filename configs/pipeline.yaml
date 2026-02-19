@@ -45,13 +45,13 @@ inverse_mapping:
   # Weighted effect sampling for active-effect selection in Phase A-3.
   # Higher value -> selected more frequently.
   effect_sampling_weights:
-    lowpass: 0.7
-    bitcrush: 1.5
-    reverb: 0.7
-    highpass: 0.7
-    distortion: 0.7
-    phaser: 3.5
-    delay: 3.5
+    lowpass: 1.0
+    bitcrush: 1.0
+    reverb: 1.0
+    highpass: 1.0
+    distortion: 1.0
+    playback_rate: 1.0
+    delay: 1.0
 
 # === Phase A-3: Inverse Mapping Database (Image / Siamese) ===
 image_inverse_mapping:
@@ -66,7 +66,8 @@ image_inverse_mapping:
       "sepia_tone",
       "solarize",
     ]
-  intensities: ["low", "mid", "high"]
+  intensity_min: 0.1
+  intensity_max: 1.0
   seed: 42
   save_augmented_images: false
   augmented_image_dir: "data/augmented/pipeline/images"
@@ -79,7 +80,7 @@ effects:
     - reverb
     - highpass
     - distortion
-    - phaser
+    - playback_rate
     - delay
 
 # === Phase B: Controller Training ===
@@ -99,14 +100,15 @@ controller:
   inactive_param_weight: 0.0
   param_loss_type: "huber" # one of: mse, huber
   huber_delta: 0.02
-  selection_metric: "val_param_loss" # one of: val_loss, val_param_loss, val_active_param_rmse
+  selection_metric: "val_activity_macro_f1" # one of: val_loss, val_param_loss, val_active_param_rmse, val_activity_macro_f1, val_activity_micro_f1
   train_backbone: true
   train_param_head: true
   train_activity_head: true
   balanced_sampler:
     enabled: true
-    effects: ["phaser", "delay"]
-    boost: 3.0
+    mode: "inverse_frequency" # one of: count_boost, inverse_frequency
+    effects: ["lowpass", "bitcrush", "reverb", "highpass", "distortion", "playback_rate", "delay"]
+    boost: 2.0
     base_weight: 1.0
   effect_loss_weights:
     lowpass: 1.0
@@ -114,7 +116,7 @@ controller:
     reverb: 1.0
     highpass: 1.0
     distortion: 1.0
-    phaser: 4.0
+    playback_rate: 2.5
     delay: 4.0
   batch_size: 256
   num_epochs: 100
@@ -122,7 +124,7 @@ controller:
   val_split: 0.2
   training_stages:
     - name: "stage1_activity_warmup"
-      epochs: 10
+      epochs: 15
       learning_rate: 0.0001
       activity_loss_weight: 1.0
       activity_mismatch_weight: 3.0
@@ -134,7 +136,7 @@ controller:
       train_activity_head: true
       selection_metric: "val_activity_macro_f1"
     - name: "stage2_joint_main"
-      epochs: 70
+      epochs: 85
       learning_rate: 0.00008
       activity_loss_weight: 0.7
       activity_mismatch_weight: 2.0
@@ -144,18 +146,7 @@ controller:
       train_backbone: true
       train_param_head: true
       train_activity_head: true
-      selection_metric: "val_param_loss"
-    - name: "stage3_param_finetune"
-      epochs: 20
-      learning_rate: 0.00003
-      activity_loss_weight: 0.0
-      activity_mismatch_weight: 0.0
-      activity_mismatch_gamma: 2.0
-      param_loss_weight: 1.0
-      train_backbone: true
-      train_param_head: true
-      train_activity_head: false
-      selection_metric: "val_active_param_rmse"
+      selection_metric: "val_activity_macro_f1"
   post_train_analysis:
     enabled: true
     out_dir: null # null -> outputs/pipeline/controller/analysis

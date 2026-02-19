@@ -39,41 +39,37 @@ class EffectSpec:
 
 EFFECT_CATALOG: Dict[str, EffectSpec] = {
     'lowpass': EffectSpec('lowpass', [
-        EffectParamSpec('cutoff_hz', 200.0, 20000.0, 'log'),
+        EffectParamSpec('cutoff_hz', 80.0, 22000.0, 'log'),
     ]),
     'bitcrush': EffectSpec('bitcrush', [
-        EffectParamSpec('bit_depth', 4.0, 16.0, 'linear'),
+        EffectParamSpec('bit_depth', 2.0, 16.0, 'linear'),
     ]),
     'reverb': EffectSpec('reverb', [
         EffectParamSpec('room_size', 0.0, 1.0, 'linear'),
         EffectParamSpec('damping', 0.0, 1.0, 'linear'),
-        EffectParamSpec('wet_level', 0.0, 0.8, 'linear'),
-        EffectParamSpec('dry_level', 0.2, 1.0, 'linear'),
+        EffectParamSpec('wet_level', 0.0, 1.0, 'linear'),
+        EffectParamSpec('dry_level', 0.0, 1.0, 'linear'),
     ]),
     'highpass': EffectSpec('highpass', [
-        EffectParamSpec('cutoff_hz', 20.0, 6000.0, 'log'),
+        EffectParamSpec('cutoff_hz', 20.0, 12000.0, 'log'),
     ]),
     'distortion': EffectSpec('distortion', [
-        EffectParamSpec('drive_db', 0.0, 40.0, 'linear'),
+        EffectParamSpec('drive_db', 0.0, 55.0, 'linear'),
     ]),
-    'phaser': EffectSpec('phaser', [
-        EffectParamSpec('rate_hz', 0.1, 8.0, 'log'),
-        EffectParamSpec('depth', 0.0, 1.0, 'linear'),
-        EffectParamSpec('centre_frequency_hz', 300.0, 4000.0, 'log'),
-        EffectParamSpec('feedback', 0.0, 0.9, 'linear'),
-        EffectParamSpec('mix', 0.0, 1.0, 'linear'),
+    'playback_rate': EffectSpec('playback_rate', [
+        EffectParamSpec('rate', 0.5, 1.8, 'log'),
     ]),
     'delay': EffectSpec('delay', [
-        EffectParamSpec('delay_seconds', 0.05, 1.0, 'log'),
-        EffectParamSpec('feedback', 0.0, 0.8, 'linear'),
-        EffectParamSpec('mix', 0.0, 0.7, 'linear'),
+        EffectParamSpec('delay_seconds', 0.01, 1.8, 'log'),
+        EffectParamSpec('feedback', 0.0, 0.95, 'linear'),
+        EffectParamSpec('mix', 0.0, 1.0, 'linear'),
     ]),
 }
 
 # Default "bypass-like" values used when an effect is inactive.
 # These are used to encode missing effect params in normalized vectors.
 BYPASS_PARAMS: Dict[str, Dict[str, float]] = {
-    "lowpass": {"cutoff_hz": 20000.0},
+    "lowpass": {"cutoff_hz": 22000.0},
     "bitcrush": {"bit_depth": 16.0},
     "reverb": {
         "room_size": 0.0,
@@ -83,15 +79,9 @@ BYPASS_PARAMS: Dict[str, Dict[str, float]] = {
     },
     "highpass": {"cutoff_hz": 20.0},
     "distortion": {"drive_db": 0.0},
-    "phaser": {
-        "rate_hz": 0.1,
-        "depth": 0.0,
-        "centre_frequency_hz": 300.0,
-        "feedback": 0.0,
-        "mix": 0.0,
-    },
+    "playback_rate": {"rate": 1.0},
     "delay": {
-        "delay_seconds": 0.05,
+        "delay_seconds": 0.01,
         "feedback": 0.0,
         "mix": 0.0,
     },
@@ -219,23 +209,9 @@ class PedalboardRenderer:
             return pb.HighpassFilter(cutoff_frequency_hz=params['cutoff_hz'])
         elif effect_name == 'distortion':
             return pb.Distortion(drive_db=params['drive_db'])
-        elif effect_name == 'phaser':
-            try:
-                return pb.Phaser(
-                    rate_hz=params['rate_hz'],
-                    depth=params['depth'],
-                    centre_frequency_hz=params['centre_frequency_hz'],
-                    feedback=params['feedback'],
-                    mix=params['mix'],
-                )
-            except TypeError:
-                return pb.Phaser(
-                    rate_hz=params['rate_hz'],
-                    depth=params['depth'],
-                    center_frequency_hz=params['centre_frequency_hz'],
-                    feedback=params['feedback'],
-                    mix=params['mix'],
-                )
+        elif effect_name == 'playback_rate':
+            # Custom non-pedalboard effect handled after board processing.
+            return None
         elif effect_name == 'delay':
             return pb.Delay(
                 delay_seconds=params['delay_seconds'],
@@ -278,8 +254,17 @@ class PedalboardRenderer:
             squeeze = True
 
         waveform = waveform.astype(np.float32)
-        board = self.build_board(params_dict)
+        rate = 1.0
+        if "playback_rate" in params_dict:
+            rate = float(params_dict.get("playback_rate", {}).get("rate", 1.0))
+            if rate <= 0.0:
+                rate = 1.0
+
+        board_params = {k: v for k, v in params_dict.items() if k != "playback_rate"}
+        board = self.build_board(board_params)
         processed = board(waveform, self.sample_rate)
+        if abs(rate - 1.0) > 1e-6:
+            processed = self._apply_playback_rate(processed, rate)
 
         # Peak normalize to prevent clipping
         peak = np.abs(processed).max()
@@ -290,6 +275,25 @@ class PedalboardRenderer:
             processed = processed.squeeze(0)
 
         return processed
+
+    @staticmethod
+    def _apply_playback_rate(waveform: np.ndarray, rate: float) -> np.ndarray:
+        """
+        Varispeed-style playback-rate transform.
+        rate > 1.0: faster/shorter, rate < 1.0: slower/longer.
+        """
+        if waveform.ndim != 2 or rate <= 0.0:
+            return waveform
+        channels, n_in = waveform.shape
+        if n_in <= 1:
+            return waveform
+        n_out = max(1, int(round(n_in / rate)))
+        x_in = np.arange(n_in, dtype=np.float32)
+        x_out = np.linspace(0.0, float(n_in - 1), n_out, dtype=np.float32)
+        out = np.empty((channels, n_out), dtype=np.float32)
+        for ch in range(channels):
+            out[ch] = np.interp(x_out, x_in, waveform[ch]).astype(np.float32)
+        return out
 
     def render_from_normalized(
         self,

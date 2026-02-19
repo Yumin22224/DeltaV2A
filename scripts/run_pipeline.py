@@ -252,7 +252,8 @@ def run_precompute(config: dict):
                     ],
                 ),
             ),
-            intensities=img_inv_cfg.get('intensities', ve_cfg.get('intensities', ["low", "mid", "high"])),
+            intensity_min=float(img_inv_cfg.get('intensity_min', ve_cfg.get('intensity_min', 0.1))),
+            intensity_max=float(img_inv_cfg.get('intensity_max', ve_cfg.get('intensity_max', 1.0))),
             seed=int(img_inv_cfg.get('seed', ve_cfg.get('seed', 42))),
             save_augmented_images=bool(
                 img_inv_cfg.get('save_augmented_images', ve_cfg.get('save_augmented_images', False))

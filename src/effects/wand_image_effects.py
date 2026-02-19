@@ -1,15 +1,4 @@
-"""
-Wand-based image effect functions.
-
-Effects:
-    - adaptive_blur
-    - motion_blur
-    - adaptive_sharpen
-    - add_noise
-    - spread
-    - sepia_tone
-    - solarize
-"""
+"""Wand-based image effects with continuous intensity in [0, 1]."""
 
 from io import BytesIO
 from typing import Literal, Union
@@ -27,20 +16,23 @@ EffectType = Literal[
     "sepia_tone",
     "solarize",
 ]
-IntensityLevel = Literal["low", "mid", "high"]
+
+_BLUR_SIGMA_MIN, _BLUR_SIGMA_MAX = 0.5, 4.0
+_MOTION_RADIUS_MIN, _MOTION_RADIUS_MAX = 2.0, 14.0
+_MOTION_SIGMA_MIN, _MOTION_SIGMA_MAX = 0.6, 4.0
+_MOTION_ANGLE_MIN, _MOTION_ANGLE_MAX = 0.0, 90.0
+_SHARPEN_SIGMA_MIN, _SHARPEN_SIGMA_MAX = 0.2, 2.2
+_SPREAD_RADIUS_MIN, _SPREAD_RADIUS_MAX = 0.2, 3.0
+_SEPIA_THRESHOLD_MIN, _SEPIA_THRESHOLD_MAX = 10.0, 85.0
+_SOLARIZE_THRESHOLD_MIN, _SOLARIZE_THRESHOLD_MAX = 20.0, 95.0
 
 
-ADAPTIVE_BLUR_SIGMA = {"low": 1.0, "mid": 2.0, "high": 3.0}
-MOTION_BLUR_LEVELS = {
-    "low": (4.0, 1.0, 15.0),
-    "mid": (8.0, 2.0, 30.0),
-    "high": (12.0, 3.0, 45.0),
-}
-ADAPTIVE_SHARPEN_SIGMA = {"low": 0.6, "mid": 1.0, "high": 1.6}
-NOISE_PASSES = {"low": 1, "mid": 2, "high": 3}
-SPREAD_RADIUS = {"low": 0.8, "mid": 1.6, "high": 2.4}
-SEPIA_THRESHOLD = {"low": "20%", "mid": "40%", "high": "65%"}
-SOLARIZE_THRESHOLD = {"low": "85%", "mid": "70%", "high": "55%"}
+def _clamp01(x: float) -> float:
+    return float(min(1.0, max(0.0, x)))
+
+
+def _lerp(a: float, b: float, t: float) -> float:
+    return a + (b - a) * t
 
 
 def _require_wand():
@@ -75,8 +67,9 @@ def _apply_wand(pil_image: Image.Image, op) -> Image.Image:
     return Image.open(BytesIO(out_blob)).convert("RGB")
 
 
-def apply_adaptive_blur(image: Image.Image, level: IntensityLevel) -> Image.Image:
-    sigma = ADAPTIVE_BLUR_SIGMA[level]
+def apply_adaptive_blur(image: Image.Image, intensity: float) -> Image.Image:
+    t = _clamp01(intensity)
+    sigma = _lerp(_BLUR_SIGMA_MIN, _BLUR_SIGMA_MAX, t)
 
     def _op(wimg):
         try:
@@ -87,8 +80,11 @@ def apply_adaptive_blur(image: Image.Image, level: IntensityLevel) -> Image.Imag
     return _apply_wand(image, _op)
 
 
-def apply_motion_blur(image: Image.Image, level: IntensityLevel) -> Image.Image:
-    radius, sigma, angle = MOTION_BLUR_LEVELS[level]
+def apply_motion_blur(image: Image.Image, intensity: float) -> Image.Image:
+    t = _clamp01(intensity)
+    radius = _lerp(_MOTION_RADIUS_MIN, _MOTION_RADIUS_MAX, t)
+    sigma = _lerp(_MOTION_SIGMA_MIN, _MOTION_SIGMA_MAX, t)
+    angle = _lerp(_MOTION_ANGLE_MIN, _MOTION_ANGLE_MAX, t)
 
     def _op(wimg):
         try:
@@ -99,8 +95,9 @@ def apply_motion_blur(image: Image.Image, level: IntensityLevel) -> Image.Image:
     return _apply_wand(image, _op)
 
 
-def apply_adaptive_sharpen(image: Image.Image, level: IntensityLevel) -> Image.Image:
-    sigma = ADAPTIVE_SHARPEN_SIGMA[level]
+def apply_adaptive_sharpen(image: Image.Image, intensity: float) -> Image.Image:
+    t = _clamp01(intensity)
+    sigma = _lerp(_SHARPEN_SIGMA_MIN, _SHARPEN_SIGMA_MAX, t)
 
     def _op(wimg):
         try:
@@ -111,21 +108,23 @@ def apply_adaptive_sharpen(image: Image.Image, level: IntensityLevel) -> Image.I
     return _apply_wand(image, _op)
 
 
-def apply_add_noise(image: Image.Image, level: IntensityLevel) -> Image.Image:
-    passes = NOISE_PASSES[level]
+def apply_add_noise(image: Image.Image, intensity: float) -> Image.Image:
+    t = _clamp01(intensity)
 
     def _op(wimg):
-        for _ in range(passes):
-            try:
-                wimg.noise("gaussian")
-            except Exception:
-                wimg.add_noise("gaussian")
+        try:
+            wimg.noise("gaussian")
+        except Exception:
+            wimg.add_noise("gaussian")
 
-    return _apply_wand(image, _op)
+    noisy = _apply_wand(image, _op)
+    # Blend keeps noise amount continuous even when primitive API is discrete.
+    return Image.blend(image, noisy, alpha=t)
 
 
-def apply_spread(image: Image.Image, level: IntensityLevel) -> Image.Image:
-    radius = SPREAD_RADIUS[level]
+def apply_spread(image: Image.Image, intensity: float) -> Image.Image:
+    t = _clamp01(intensity)
+    radius = _lerp(_SPREAD_RADIUS_MIN, _SPREAD_RADIUS_MAX, t)
 
     def _op(wimg):
         try:
@@ -154,13 +153,17 @@ def _apply_threshold_op(wimg, method_name: str, threshold: str):
     method(value)
 
 
-def apply_sepia_tone(image: Image.Image, level: IntensityLevel) -> Image.Image:
-    threshold = SEPIA_THRESHOLD[level]
+def apply_sepia_tone(image: Image.Image, intensity: float) -> Image.Image:
+    t = _clamp01(intensity)
+    threshold = f"{_lerp(_SEPIA_THRESHOLD_MIN, _SEPIA_THRESHOLD_MAX, t):.2f}%"
     return _apply_wand(image, lambda wimg: _apply_threshold_op(wimg, "sepia_tone", threshold))
 
 
-def apply_solarize(image: Image.Image, level: IntensityLevel) -> Image.Image:
-    threshold = SOLARIZE_THRESHOLD[level]
+def apply_solarize(image: Image.Image, intensity: float) -> Image.Image:
+    t = _clamp01(intensity)
+    # Higher intensity => lower threshold (stronger solarization)
+    threshold_val = _lerp(_SOLARIZE_THRESHOLD_MAX, _SOLARIZE_THRESHOLD_MIN, t)
+    threshold = f"{threshold_val:.2f}%"
     return _apply_wand(image, lambda wimg: _apply_threshold_op(wimg, "solarize", threshold))
 
 
@@ -178,17 +181,13 @@ IMAGE_EFFECTS = {
 def apply_effect(
     image: Union[Image.Image, np.ndarray, str],
     effect_type: EffectType,
-    intensity: IntensityLevel,
+    intensity: float,
 ) -> Image.Image:
     pil = _to_pil(image)
     if effect_type not in IMAGE_EFFECTS:
         raise ValueError(f"Unknown effect type: {effect_type}")
-    return IMAGE_EFFECTS[effect_type](pil, intensity)
+    return IMAGE_EFFECTS[effect_type](pil, float(intensity))
 
 
 def get_effect_types() -> list[EffectType]:
     return list(IMAGE_EFFECTS.keys())
-
-
-def get_intensity_levels() -> list[IntensityLevel]:
-    return ["low", "mid", "high"]

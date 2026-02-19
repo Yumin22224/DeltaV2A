@@ -99,7 +99,8 @@ def build_image_inverse_mapping_db(
     output_path: str,
     augmentations_per_image: int = 2,
     effect_types: Optional[List[str]] = None,
-    intensities: Optional[List[str]] = None,
+    intensity_min: float = 0.1,
+    intensity_max: float = 1.0,
     seed: int = 42,
     save_augmented_images: bool = False,
     augmented_image_dir: Optional[str] = None,
@@ -115,12 +116,16 @@ def build_image_inverse_mapping_db(
             "sepia_tone",
             "solarize",
         ]
-    if intensities is None:
-        intensities = ["low", "mid", "high"]
     if augmentations_per_image <= 0:
         raise ValueError("augmentations_per_image must be > 0")
     if not image_paths:
         raise ValueError("image_paths is empty")
+    intensity_min = float(intensity_min)
+    intensity_max = float(intensity_max)
+    if not (0.0 <= intensity_min <= 1.0 and 0.0 <= intensity_max <= 1.0):
+        raise ValueError("intensity_min/intensity_max must be in [0, 1]")
+    if intensity_min > intensity_max:
+        raise ValueError("intensity_min must be <= intensity_max")
 
     rng = np.random.default_rng(seed)
     img_vocab = img_vocab_embeddings.astype(np.float32)
@@ -136,7 +141,7 @@ def build_image_inverse_mapping_db(
     print(f"  Augmentations/image: {augmentations_per_image}")
     print(f"  Total records (planned): {total_records}")
     print(f"  Effect types: {effect_types}")
-    print(f"  Intensities: {intensities}")
+    print(f"  Intensity range: [{intensity_min:.3f}, {intensity_max:.3f}]")
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
@@ -160,7 +165,8 @@ def build_image_inverse_mapping_db(
         f.attrs["vocab_size"] = vocab_size
         f.attrs["augmentations_per_image"] = int(augmentations_per_image)
         f.attrs["effect_types"] = json.dumps(effect_types)
-        f.attrs["intensities"] = json.dumps(intensities)
+        f.attrs["intensity_min"] = intensity_min
+        f.attrs["intensity_max"] = intensity_max
 
         record_idx = 0
         with open(manifest_path, "w") if manifest_path else nullcontext() as manifest_fp:
@@ -176,10 +182,10 @@ def build_image_inverse_mapping_db(
 
                 for aug_idx in range(augmentations_per_image):
                     effect = str(effect_types[int(rng.integers(0, len(effect_types)))])
-                    intensity = str(intensities[int(rng.integers(0, len(intensities)))])
+                    intensity = float(rng.uniform(intensity_min, intensity_max))
 
                     try:
-                        edited_pil = apply_effect(original_pil, effect, intensity)
+                        edited_pil = apply_effect(original_pil, effect, float(intensity))
                         edited_tensor = TF.to_tensor(edited_pil).unsqueeze(0)
                         diff_tensor = torch.clamp((edited_tensor - original_tensor + 1.0) / 2.0, 0.0, 1.0)
 
@@ -201,7 +207,7 @@ def build_image_inverse_mapping_db(
                         aug_relpath = None
                         if aug_root is not None:
                             category = source_path.parent.name
-                            aug_subdir = aug_root / category / f"{effect}_{intensity}"
+                            aug_subdir = aug_root / category / effect
                             aug_subdir.mkdir(parents=True, exist_ok=True)
                             aug_name = f"{source_path.stem}__img_aug_{aug_idx:04d}.png"
                             aug_path = aug_subdir / aug_name
@@ -214,7 +220,7 @@ def build_image_inverse_mapping_db(
                                 "source_image_path": str(source_path),
                                 "augmented_image_path": aug_relpath,
                                 "effect": effect,
-                                "intensity": intensity,
+                                "intensity": float(intensity),
                             }) + "\n")
 
                         record_idx += 1
