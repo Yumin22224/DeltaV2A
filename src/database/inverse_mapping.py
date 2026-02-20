@@ -70,6 +70,11 @@ class InverseMappingDataset:
                 self.effect_active_mask = _infer_effect_active_masks_from_params(
                     self.normalized_params, self.effect_names
                 )
+            _order_obj = f.get('effect_order')
+            if isinstance(_order_obj, h5py.Dataset):
+                self.effect_order = _order_obj[:actual]
+            else:
+                self.effect_order = None
         self._size = len(self.clap_embeddings)
 
     def __len__(self) -> int:
@@ -136,6 +141,48 @@ def _infer_effect_active_masks_from_params(
     return masks
 
 
+def _save_checkpoint(
+    checkpoint_path: Path,
+    completed_audio_files: int,
+    record_idx: int,
+    rng: np.random.Generator,
+    active_effect_counts: Dict[str, int],
+) -> None:
+    """Save build progress so it can be resumed later."""
+    state = rng.bit_generator.state
+    ckpt = {
+        'completed_audio_files': completed_audio_files,
+        'record_idx': record_idx,
+        'active_effect_counts': active_effect_counts,
+        'rng_state': {
+            'bit_generator': state['bit_generator'],
+            'state': str(state['state']['state']),
+            'inc': str(state['state']['inc']),
+            'has_uint32': int(state['has_uint32']),
+            'uinteger': int(state['uinteger']),
+        },
+    }
+    tmp = checkpoint_path.with_suffix('.tmp')
+    with open(tmp, 'w') as f:
+        json.dump(ckpt, f)
+    tmp.rename(checkpoint_path)
+
+
+def _load_checkpoint(checkpoint_path: Path) -> Dict:
+    """Load a previously saved checkpoint."""
+    with open(checkpoint_path, 'r') as f:
+        ckpt = json.load(f)
+    # Restore RNG state from JSON-safe format
+    rs = ckpt['rng_state']
+    ckpt['_rng_bit_generator_state'] = {
+        'bit_generator': rs['bit_generator'],
+        'state': {'state': int(rs['state']), 'inc': int(rs['inc'])},
+        'has_uint32': rs['has_uint32'],
+        'uinteger': rs['uinteger'],
+    }
+    return ckpt
+
+
 def build_inverse_mapping_db(
     audio_paths: List[str],
     clap_embedder,
@@ -152,13 +199,27 @@ def build_inverse_mapping_db(
     min_active_effects: int = 1,
     max_active_effects: Optional[int] = None,
     effect_sampling_weights: Optional[Dict[str, float]] = None,
+    use_delta_clap: bool = True,
+    resume: bool = False,
+    param_min_intensity: float = 0.0,
 ) -> InverseMappingDB:
     """
     Build the inverse mapping database.
 
     For each audio file, generates multiple augmented versions with random
     pedalboard parameters. Stores CLAP(A) as input context and computes
-    style labels from CLAP(A') vs AUD_VOCAB similarity.
+    style labels from AUD_VOCAB similarity.
+
+    When use_delta_clap=True (default), style labels are computed from
+    the delta embedding CLAP(A') - CLAP(A), which isolates the effect-induced
+    change and cancels the genre/content signal that dominates absolute
+    embeddings. This aligns with inference where image deltas
+    CLIP(I') - CLIP(I) are used for style retrieval.
+
+    When resume=True, attempts to continue from a previous interrupted build
+    by reading the checkpoint file (output_path.checkpoint.json). The RNG
+    state, record index, and audio file index are restored so results are
+    identical to a fresh build.
     """
     import librosa
     import soundfile as sf
@@ -186,12 +247,32 @@ def build_inverse_mapping_db(
         raise ValueError("effect_sampling_weights must have at least one positive value")
     sampling_probs = (raw_weights / raw_weights.sum()).astype(np.float64)
 
+    # --- Resume support ---
+    checkpoint_path = Path(output_path).with_suffix('.checkpoint.json')
+    start_audio_idx = 0
+    record_idx = 0
+    active_effect_counts = {name: 0 for name in effect_names}
+    resuming = False
+
+    if resume and Path(output_path).exists() and checkpoint_path.exists():
+        ckpt = _load_checkpoint(checkpoint_path)
+        start_audio_idx = ckpt['completed_audio_files']
+        record_idx = ckpt['record_idx']
+        active_effect_counts = ckpt.get('active_effect_counts', active_effect_counts)
+        rng.bit_generator.state = ckpt['_rng_bit_generator_state']
+        resuming = True
+        print(f"Resuming inverse mapping build from checkpoint:")
+        print(f"  Completed audio files: {start_audio_idx}/{len(audio_paths)}")
+        print(f"  Records written: {record_idx}/{total_records}")
+
     print(f"Building inverse mapping database...")
     print(f"  Audio files: {len(audio_paths)}")
     print(f"  Augmentations/file: {num_augmentations_per_audio}")
     print(f"  Total records: {total_records}")
     print(f"  Effects: {effect_names}")
     print(f"  Active effects per sample: {min_active_effects}..{max_active_effects}")
+    style_mode = "delta CLAP(A')-CLAP(A)" if use_delta_clap else "absolute CLAP(A')"
+    print(f"  Style label mode: {style_mode}")
     print("  Effect sampling probabilities:")
     for name, p in zip(effect_names, sampling_probs):
         print(f"    {name}: {p:.4f}")
@@ -209,29 +290,52 @@ def build_inverse_mapping_db(
         aug_root.mkdir(parents=True, exist_ok=True)
         manifest_path = aug_root / "manifest.jsonl"
 
-    with h5py.File(output_path, 'w') as f:
-        clap_ds = f.create_dataset('clap_embeddings', shape=(total_records, 512), dtype='float32')
-        style_ds = f.create_dataset('style_labels', shape=(total_records, vocab_size), dtype='float32')
-        params_ds = f.create_dataset('normalized_params', shape=(total_records, total_params), dtype='float32')
-        active_ds = f.create_dataset('effect_active_mask', shape=(total_records, len(effect_names)), dtype='float32')
+    h5_mode = 'r+' if resuming else 'w'
+    manifest_mode = 'a' if resuming else 'w'
 
-        f.attrs['effect_names'] = ','.join(effect_names)
-        f.attrs['total_params'] = total_params
-        f.attrs['vocab_size'] = vocab_size
-        f.attrs['sample_rate'] = sample_rate
-        f.attrs['temperature'] = temperature
-        f.attrs['input_context'] = 'clap_raw_audio'
-        f.attrs['num_effects'] = len(effect_names)
-        f.attrs['min_active_effects'] = min_active_effects
-        f.attrs['max_active_effects'] = max_active_effects
-        f.attrs['effect_sampling_weights_json'] = json.dumps(
-            {name: float(w) for name, w in zip(effect_names, raw_weights)}
-        )
+    with h5py.File(output_path, h5_mode) as f:
+        if resuming:
+            clap_ds = f['clap_embeddings']
+            style_ds = f['style_labels']
+            params_ds = f['normalized_params']
+            active_ds = f['effect_active_mask']
+            order_ds = f['effect_order'] if 'effect_order' in f else f.create_dataset(
+                'effect_order', shape=(total_records, max_active_effects), dtype='int8',
+                fillvalue=-1,
+            )
+        else:
+            clap_ds = f.create_dataset('clap_embeddings', shape=(total_records, 512), dtype='float32')
+            style_ds = f.create_dataset('style_labels', shape=(total_records, vocab_size), dtype='float32')
+            params_ds = f.create_dataset('normalized_params', shape=(total_records, total_params), dtype='float32')
+            active_ds = f.create_dataset('effect_active_mask', shape=(total_records, len(effect_names)), dtype='float32')
+            order_ds = f.create_dataset('effect_order', shape=(total_records, max_active_effects), dtype='int8',
+                                        fillvalue=-1)
 
-        record_idx = 0
-        active_effect_counts = {name: 0 for name in effect_names}
-        with open(manifest_path, 'w') if manifest_path else nullcontext() as manifest_fp:
-            for audio_path in tqdm(audio_paths, desc="Building inverse mapping DB"):
+            f.attrs['effect_names'] = ','.join(effect_names)
+            f.attrs['total_params'] = total_params
+            f.attrs['vocab_size'] = vocab_size
+            f.attrs['sample_rate'] = sample_rate
+            f.attrs['temperature'] = temperature
+            f.attrs['input_context'] = 'clap_raw_audio'
+            f.attrs['use_delta_clap'] = bool(use_delta_clap)
+            f.attrs['num_effects'] = len(effect_names)
+            f.attrs['min_active_effects'] = min_active_effects
+            f.attrs['max_active_effects'] = max_active_effects
+            f.attrs['effect_sampling_weights_json'] = json.dumps(
+                {name: float(w) for name, w in zip(effect_names, raw_weights)}
+            )
+
+        with open(manifest_path, manifest_mode) if manifest_path else nullcontext() as manifest_fp:
+            pbar = tqdm(
+                enumerate(audio_paths),
+                total=len(audio_paths),
+                initial=start_audio_idx,
+                desc="Building inverse mapping DB",
+            )
+            for audio_idx, audio_path in pbar:
+                if audio_idx < start_audio_idx:
+                    continue
+
                 try:
                     waveform, _ = librosa.load(audio_path, sr=sample_rate, mono=True)
                     max_samples = int(max_duration * sample_rate)
@@ -249,6 +353,9 @@ def build_inverse_mapping_db(
                     category = source.parent.name
                     source_stem = source.stem
 
+                    # Pre-compute original RMS for volume normalization.
+                    rms_original = float(np.sqrt(np.mean(waveform ** 2)))
+
                     for aug_idx in range(num_augmentations_per_audio):
                         # Randomly select subset of effects, then sample params.
                         n_active = int(rng.integers(min_active_effects, max_active_effects + 1))
@@ -260,17 +367,36 @@ def build_inverse_mapping_db(
                                 p=sampling_probs,
                             )
                         )
+                        # Explicitly shuffle application order so the AR controller
+                        # can learn diverse effect chain orderings.
+                        rng.shuffle(active_effects)
+
                         for effect in active_effects:
                             active_effect_counts[effect] += 1
-                        params_dict = sample_random_params(active_effects, rng)
+                        params_dict = sample_random_params(active_effects, rng, param_min_intensity=param_min_intensity)
                         norm_params = normalize_params(params_dict, effect_names)
                         active_mask = np.array(
                             [1.0 if name in active_effects else 0.0 for name in effect_names],
                             dtype=np.float32,
                         )
+                        # effect_order: indices of active effects in application order, -1 padded.
+                        name_to_idx = {name: i for i, name in enumerate(effect_names)}
+                        effect_order = np.full(max_active_effects, -1, dtype=np.int8)
+                        for step, eff in enumerate(active_effects):
+                            effect_order[step] = name_to_idx[eff]
 
-                        # Apply effects
+                        # Apply effects in the shuffled order.
                         processed = renderer.render(waveform, params_dict)
+
+                        # Volume normalization: match processed RMS to original so that
+                        # CLAP delta captures timbral/spectral change only, not loudness shift.
+                        rms_processed = float(np.sqrt(np.mean(processed ** 2)))
+                        if rms_processed > 1e-8 and rms_original > 1e-8:
+                            processed = processed * (rms_original / rms_processed)
+                            # Re-clamp to prevent clipping after rescaling.
+                            peak = float(np.abs(processed).max())
+                            if peak > 1.0:
+                                processed = processed / peak * 0.95
 
                         aug_relpath = None
                         if aug_root is not None:
@@ -287,12 +413,23 @@ def build_inverse_mapping_db(
                         proc_norm = np.linalg.norm(clap_proc)
                         if proc_norm > 0:
                             clap_proc = clap_proc / proc_norm
-                        style_label = _compute_style_label(clap_proc, aud_vocab_embeddings, temperature)
+
+                        if use_delta_clap:
+                            # Delta mode: use CLAP(A') - CLAP(A) to isolate effect-induced change.
+                            # Cancels genre/content signal that dominates absolute embeddings.
+                            clap_delta = clap_proc - clap_raw
+                            delta_norm = np.linalg.norm(clap_delta)
+                            if delta_norm > 0:
+                                clap_delta = clap_delta / delta_norm
+                            style_label = _compute_style_label(clap_delta, aud_vocab_embeddings, temperature)
+                        else:
+                            style_label = _compute_style_label(clap_proc, aud_vocab_embeddings, temperature)
 
                         clap_ds[record_idx] = clap_raw
                         style_ds[record_idx] = style_label
                         params_ds[record_idx] = norm_params
                         active_ds[record_idx] = active_mask
+                        order_ds[record_idx] = effect_order
 
                         if manifest_fp is not None:
                             # Keep a lightweight trace so generated audio can be audited later.
@@ -301,6 +438,7 @@ def build_inverse_mapping_db(
                                 'source_audio_path': audio_path,
                                 'augmented_audio_path': aug_relpath,
                                 'active_effects': active_effects,
+                                'effect_order': [int(x) for x in effect_order],
                                 'sample_rate': sample_rate,
                                 'params': params_dict,
                             }) + "\n")
@@ -311,7 +449,21 @@ def build_inverse_mapping_db(
                     print(f"Warning: Failed {audio_path}: {e}")
                     continue
 
+                # Save checkpoint after each audio file completes.
+                f.attrs['actual_records'] = record_idx
+                f.flush()
+                if manifest_fp is not None:
+                    manifest_fp.flush()
+                _save_checkpoint(
+                    checkpoint_path, audio_idx + 1, record_idx, rng, active_effect_counts,
+                )
+
         f.attrs['actual_records'] = record_idx
+
+    # Clean up checkpoint on successful completion.
+    if checkpoint_path.exists():
+        checkpoint_path.unlink()
+        print("Checkpoint file removed (build complete).")
 
     print(f"Saved {record_idx} records to {output_path}")
     if record_idx > 0:

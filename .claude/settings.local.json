@@ -5,7 +5,9 @@
       "Bash(python -m pip:*)",
       "Bash(python -c:*)",
       "Bash(python:*)",
-      "Bash(pip install:*)"
+      "Bash(pip install:*)",
+      "Bash(./venv_DeltaV2A/bin/python:*)",
+      "Bash(python3:*)"
     ]
   }
 }

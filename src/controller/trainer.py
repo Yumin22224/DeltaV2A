@@ -54,6 +54,8 @@ class ControllerTrainer:
         train_backbone: bool = True,
         train_param_head: bool = True,
         train_activity_head: bool = True,
+        lr_scheduler_type: str = "none",
+        lr_min: float = 1e-6,
     ):
         self.model = model.to(device)
         self.device = device
@@ -113,6 +115,8 @@ class ControllerTrainer:
                 "Set at least one of train_backbone/train_param_head/train_activity_head to true."
             )
         self.optimizer = optim.AdamW(trainable_params, lr=learning_rate, weight_decay=weight_decay)
+        self.lr_scheduler_type = str(lr_scheduler_type).lower()
+        self.lr_min = float(lr_min)
         self.history = {
             'train_loss': [],
             'val_loss': [],
@@ -567,6 +571,13 @@ class ControllerTrainer:
             f"param_head={self.train_param_head}, activity_head={self.train_activity_head}"
         )
 
+        scheduler = None
+        if self.lr_scheduler_type == "cosine":
+            scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                self.optimizer, T_max=num_epochs, eta_min=self.lr_min
+            )
+            print(f"  LR scheduler: CosineAnnealingLR (T_max={num_epochs}, eta_min={self.lr_min})")
+
         def _select_metric(
             val_loss: float,
             val_param_loss: float,
@@ -637,6 +648,9 @@ class ControllerTrainer:
                 val_activity_macro_f1=val_activity_macro_f1,
                 val_activity_micro_f1=val_activity_micro_f1,
             )
+            if scheduler is not None:
+                scheduler.step()
+
             if _is_better(select_val, self.history['best_selection_metric']):
                 self.history['best_val_loss'] = val_loss
                 self.history['best_val_param_loss'] = val_param_loss
@@ -714,7 +728,9 @@ def train_controller(
     batch_size: int = 64,
     num_epochs: int = 100,
     learning_rate: float = 1e-4,
+    weight_decay: float = 1e-5,
     val_split: float = 0.2,
+    audio_embed_dim: int = 512,
     hidden_dims: List[int] = None,
     dropout: float = 0.1,
     use_activity_head: bool = False,
@@ -737,6 +753,8 @@ def train_controller(
     train_backbone: bool = True,
     train_param_head: bool = True,
     train_activity_head: bool = True,
+    lr_scheduler_type: str = "none",
+    lr_min: float = 1e-6,
     device: str = "cpu",
 ):
     """High-level function to train the AudioController."""
@@ -804,7 +822,7 @@ def train_controller(
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
 
     model = AudioController(
-        audio_embed_dim=512,
+        audio_embed_dim=audio_embed_dim,
         style_vocab_size=style_vocab_size,
         total_params=total_params,
         hidden_dims=hidden_dims or [512, 256, 128],
@@ -844,6 +862,8 @@ def train_controller(
                 "train_backbone": bool(raw.get("train_backbone", train_backbone)),
                 "train_param_head": bool(raw.get("train_param_head", train_param_head)),
                 "train_activity_head": bool(raw.get("train_activity_head", train_activity_head)),
+                "lr_scheduler_type": str(raw.get("lr_scheduler_type", lr_scheduler_type)),
+                "lr_min": float(raw.get("lr_min", lr_min)),
             })
     if not stage_cfgs:
         stage_cfgs = [{
@@ -864,6 +884,8 @@ def train_controller(
             "train_backbone": bool(train_backbone),
             "train_param_head": bool(train_param_head),
             "train_activity_head": bool(train_activity_head),
+            "lr_scheduler_type": str(lr_scheduler_type),
+            "lr_min": float(lr_min),
         }]
 
     aggregate_keys = [
@@ -931,6 +953,7 @@ def train_controller(
             val_loader=val_loader,
             device=device,
             learning_rate=stage["learning_rate"],
+            weight_decay=weight_decay,
             effect_names=effect_names,
             inactive_param_weight=inactive_param_weight,
             activity_loss_weight=stage["activity_loss_weight"],
@@ -950,6 +973,8 @@ def train_controller(
             train_backbone=stage["train_backbone"],
             train_param_head=stage["train_param_head"],
             train_activity_head=stage["train_activity_head"],
+            lr_scheduler_type=stage["lr_scheduler_type"],
+            lr_min=stage["lr_min"],
         )
         stage_history = trainer.train(num_epochs=stage["epochs"], save_dir=str(stage_dir))
 

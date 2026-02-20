@@ -37,11 +37,17 @@ vocab:
 
 # === Phase A-2: Inverse Mapping Database (Music / Controller) ===
 inverse_mapping:
-  augmentations_per_audio: 30
+  use_delta_clap: true # true: style label from CLAP(A')-CLAP(A), false: from CLAP(A')
+  augmentations_per_audio: 60
   temperature: 0.1
   seed: 42
   min_active_effects: 1
-  max_active_effects: 3
+  max_active_effects: 2
+  # Minimum intensity for active-effect parameters in normalized [0,1] space.
+  # Ensures effects are audibly strong enough to produce meaningful CLAP deltas.
+  # - Params with bypass at 0 (e.g. reverb wet_level, delay mix): sampled from [min, 1]
+  # - Params with bypass at 1 (e.g. bitcrush bit_depth, lowpass cutoff): sampled from [0, 1-min]
+  param_min_intensity: 0.35
   # Weighted effect sampling for active-effect selection in Phase A-3.
   # Higher value -> selected more frequently.
   effect_sampling_weights:
@@ -85,10 +91,17 @@ effects:
 
 # === Phase B: Controller Training ===
 controller:
-  hidden_dims: [1024, 512, 512, 256]
-  dropout: 0.2
+  # Style-only input: CLAP embedding adds near-zero info (probe shows clap_only ≈ mean baseline).
+  # Setting audio_embed_dim=0 removes 512-dim noise and forces the model to rely on
+  # the 24-dim delta-CLAP style label which does carry useful signal.
+  audio_embed_dim: 0
+  hidden_dims: [256, 256, 128]
+  dropout: 0.3
+  weight_decay: 0.001
+  lr_scheduler: "cosine"
+  lr_min: 1.0e-6
   use_activity_head: true
-  activity_loss_weight: 0.8
+  activity_loss_weight: 0.5
   activity_mismatch_weight: 2.0
   activity_mismatch_gamma: 2.0
   activity_loss_type: "asl" # one of: bce, focal, asl
@@ -100,7 +113,8 @@ controller:
   inactive_param_weight: 0.0
   param_loss_type: "huber" # one of: mse, huber
   huber_delta: 0.02
-  selection_metric: "val_activity_macro_f1" # one of: val_loss, val_param_loss, val_active_param_rmse, val_activity_macro_f1, val_activity_micro_f1
+  # Focus selection on param quality (previously activity F1 caused stage-1 local minimum)
+  selection_metric: "val_active_param_rmse"
   train_backbone: true
   train_param_head: true
   train_activity_head: true
@@ -116,29 +130,22 @@ controller:
     reverb: 1.0
     highpass: 1.0
     distortion: 1.0
-    playback_rate: 2.5
-    delay: 4.0
+    playback_rate: 1.5
+    delay: 2.0
   batch_size: 256
-  num_epochs: 100
+  num_epochs: 150
   learning_rate: 0.0001
   val_split: 0.2
+  # Single-stage joint training: removing stage-1 activity warmup which caused
+  # the backbone to overfit to activity detection before param prediction was enabled,
+  # trapping the model in a local minimum (best_epoch was always epoch 15 = stage-1 end).
   training_stages:
-    - name: "stage1_activity_warmup"
-      epochs: 15
+    - name: "joint_from_scratch"
+      epochs: 150
       learning_rate: 0.0001
-      activity_loss_weight: 1.0
-      activity_mismatch_weight: 3.0
-      activity_mismatch_gamma: 2.0
-      activity_loss_type: "asl"
-      param_loss_weight: 0.0
-      train_backbone: true
-      train_param_head: false
-      train_activity_head: true
-      selection_metric: "val_activity_macro_f1"
-    - name: "stage2_joint_main"
-      epochs: 85
-      learning_rate: 0.00008
-      activity_loss_weight: 0.7
+      lr_scheduler_type: "cosine"
+      lr_min: 1.0e-6
+      activity_loss_weight: 0.5
       activity_mismatch_weight: 2.0
       activity_mismatch_gamma: 2.0
       activity_loss_type: "asl"
@@ -146,7 +153,7 @@ controller:
       train_backbone: true
       train_param_head: true
       train_activity_head: true
-      selection_metric: "val_activity_macro_f1"
+      selection_metric: "val_active_param_rmse"
   post_train_analysis:
     enabled: true
     out_dir: null # null -> outputs/pipeline/controller/analysis
@@ -160,6 +167,24 @@ controller:
     manifest_path: null # null -> data.augmented_audio_dir/manifest.jsonl
     hidden_dims: null # null -> reuse controller.hidden_dims
     dropout: null # null -> reuse controller.dropout
+
+# === Phase B-AR: AR Hybrid Controller Training ===
+ar_controller:
+  condition_dim: 128
+  hidden_dim: 256
+  dropout: 0.1
+  max_steps: 2
+  num_epochs: 150
+  batch_size: 256
+  learning_rate: 0.0001
+  weight_decay: 0.001
+  val_split: 0.2
+  seed: 42
+  effect_loss_weight: 1.0
+  param_loss_weight: 1.0
+  huber_delta: 0.02
+  lr_scheduler: "cosine"
+  lr_min: 1.0e-6
 
 # === Phase C: Visual Encoder ===
 visual_encoder:

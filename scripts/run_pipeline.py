@@ -4,13 +4,15 @@ DeltaV2A Pipeline Runner (Phase A-C)
 
 Commands:
   precompute    - Phase A: Build vocab + inverse mapping DBs (music/image)
-  train         - Phase B: Train controller + optional Siamese visual encoder
+  train         - Phase B: Train MLP controller + optional Siamese visual encoder
+  train_ar      - Phase B: Train AR Hybrid controller
   infer         - Phase C: Run inference (I, I', A) -> A'
-  all           - precompute + train
+  all           - precompute + train + train_ar
 
 Usage:
     python scripts/run_pipeline.py precompute --config configs/pipeline.yaml
     python scripts/run_pipeline.py train --config configs/pipeline.yaml
+    python scripts/run_pipeline.py train_ar --config configs/pipeline.yaml
     python scripts/run_pipeline.py infer --config configs/pipeline.yaml \\
         --original img_orig.jpg --edited img_edit.jpg \\
         --audio input.wav --output output.wav
@@ -161,7 +163,7 @@ def get_image_paths(config: dict) -> list:
 # COMMAND: PRECOMPUTE (Phase A)
 # =============================================================================
 
-def run_precompute(config: dict):
+def run_precompute(config: dict, resume: bool = False):
     """Phase A: Build vocab + inverse mapping DBs (music + optional image)."""
     from src.vocab import StyleVocabulary
     from src.database import build_inverse_mapping_db, build_image_inverse_mapping_db
@@ -180,9 +182,15 @@ def run_precompute(config: dict):
     print("=" * 60)
 
     vocab = StyleVocabulary()
-    vocab.build_img_vocab(clip)
-    vocab.build_aud_vocab(clap)
-    vocab.save(str(output_dir))
+    aud_vocab_path = output_dir / "aud_vocab.npz"
+    img_vocab_path = output_dir / "img_vocab.npz"
+    if resume and aud_vocab_path.exists() and img_vocab_path.exists():
+        vocab.load(str(output_dir))
+        print("Loaded existing vocab (resume mode).")
+    else:
+        vocab.build_img_vocab(clip)
+        vocab.build_aud_vocab(clap)
+        vocab.save(str(output_dir))
 
     # --- Phase A-2: Inverse Mapping Database (Music) ---
     print("\n" + "=" * 60)
@@ -212,6 +220,9 @@ def run_precompute(config: dict):
             min_active_effects=inv_cfg.get('min_active_effects', 1),
             max_active_effects=inv_cfg.get('max_active_effects'),
             effect_sampling_weights=inv_cfg.get('effect_sampling_weights'),
+            use_delta_clap=inv_cfg.get('use_delta_clap', True),
+            resume=resume,
+            param_min_intensity=float(inv_cfg.get('param_min_intensity', 0.0)),
         )
 
     # --- Phase A-3: Inverse Mapping Database (Image) ---
@@ -322,7 +333,9 @@ def run_train(config: dict):
             batch_size=ctrl_cfg['batch_size'],
             num_epochs=ctrl_cfg['num_epochs'],
             learning_rate=controller_lr,
+            weight_decay=float(ctrl_cfg.get('weight_decay', 1e-5)),
             val_split=ctrl_cfg['val_split'],
+            audio_embed_dim=int(ctrl_cfg.get('audio_embed_dim', 512)),
             hidden_dims=ctrl_cfg.get('hidden_dims'),
             dropout=ctrl_cfg.get('dropout', 0.1),
             use_activity_head=bool(ctrl_cfg.get('use_activity_head', False)),
@@ -345,6 +358,8 @@ def run_train(config: dict):
             train_backbone=bool(ctrl_cfg.get('train_backbone', True)),
             train_param_head=bool(ctrl_cfg.get('train_param_head', True)),
             train_activity_head=bool(ctrl_cfg.get('train_activity_head', True)),
+            lr_scheduler_type=str(ctrl_cfg.get('lr_scheduler', 'none')),
+            lr_min=float(ctrl_cfg.get('lr_min', 1e-6)),
             device=config.get('device', 'cpu'),
         )
 
@@ -449,6 +464,70 @@ def run_train(config: dict):
 
 
 # =============================================================================
+# COMMAND: TRAIN AR (Phase B-AR)
+# =============================================================================
+
+def run_train_ar(config: dict):
+    """Phase B-AR: Train AR Hybrid Controller."""
+    from src.controller import train_ar_controller
+
+    output_dir = Path(config['output']['dir'])
+    db_path = output_dir / "inverse_mapping.h5"
+
+    # Load pipeline config for vocab size
+    pipeline_cfg_path = output_dir / 'pipeline_config.json'
+    if not pipeline_cfg_path.exists():
+        print(f"ERROR: pipeline_config.json not found at {pipeline_cfg_path}. Run 'precompute' first.")
+        return
+    with open(pipeline_cfg_path, 'r') as f:
+        pipeline_cfg = json.load(f)
+
+    effect_names = config['effects']['active']
+    ar_cfg = config.get('ar_controller', {})
+
+    print("\n" + "=" * 60)
+    print("PHASE B-AR: TRAIN AR HYBRID CONTROLLER")
+    print("=" * 60)
+
+    if not db_path.exists():
+        print(f"WARNING: Inverse mapping DB not found: {db_path}. Skipping AR controller training.")
+        return
+
+    ar_output_dir = str(output_dir / "ar_controller")
+
+    train_ar_controller(
+        db_path=str(db_path),
+        effect_names=effect_names,
+        output_dir=ar_output_dir,
+        # Model
+        style_vocab_size=pipeline_cfg['aud_vocab_size'],
+        condition_dim=int(ar_cfg.get('condition_dim', 128)),
+        hidden_dim=int(ar_cfg.get('hidden_dim', 256)),
+        dropout=float(ar_cfg.get('dropout', 0.1)),
+        max_steps=int(ar_cfg.get('max_steps', 2)),
+        # Training
+        num_epochs=int(ar_cfg.get('num_epochs', 150)),
+        batch_size=int(ar_cfg.get('batch_size', 256)),
+        learning_rate=float(ar_cfg.get('learning_rate', 1e-4)),
+        weight_decay=float(ar_cfg.get('weight_decay', 1e-3)),
+        val_split=float(ar_cfg.get('val_split', 0.2)),
+        seed=int(ar_cfg.get('seed', 42)),
+        device=config.get('device', 'cpu'),
+        # Loss
+        effect_loss_weight=float(ar_cfg.get('effect_loss_weight', 1.0)),
+        param_loss_weight=float(ar_cfg.get('param_loss_weight', 1.0)),
+        huber_delta=float(ar_cfg.get('huber_delta', 0.02)),
+        # LR schedule
+        lr_scheduler_type=str(ar_cfg.get('lr_scheduler', 'cosine')),
+        lr_min=float(ar_cfg.get('lr_min', 1e-6)),
+    )
+
+    print("\n" + "=" * 60)
+    print("PHASE B-AR COMPLETE")
+    print("=" * 60)
+
+
+# =============================================================================
 # COMMAND: INFER (Phase C)
 # =============================================================================
 
@@ -492,11 +571,12 @@ def run_infer(config: dict, args):
 # =============================================================================
 
 def run_all(config: dict):
-    """Run precompute + train."""
+    """Run precompute + train + train_ar."""
     run_precompute(config)
     run_train(config)
+    run_train_ar(config)
     print("\n" + "=" * 60)
-    print("ALL PHASES COMPLETE (A + B)")
+    print("ALL PHASES COMPLETE (A + B + B-AR)")
     print("=" * 60)
 
 
@@ -513,7 +593,7 @@ def main():
 
     parser.add_argument(
         'command',
-        choices=['precompute', 'train', 'infer', 'all'],
+        choices=['precompute', 'train', 'train_ar', 'infer', 'all'],
         help="Command to run",
     )
     parser.add_argument('--config', type=str, default='configs/pipeline.yaml')
@@ -527,6 +607,12 @@ def main():
         '--augmentations-per-audio',
         type=int,
         help="Optional override for inverse_mapping.augmentations_per_audio.",
+    )
+    parser.add_argument(
+        '--resume',
+        action='store_true',
+        default=False,
+        help="Resume an interrupted precompute build from checkpoint.",
     )
 
     # Inference-specific args
@@ -553,9 +639,11 @@ def main():
 
     try:
         if args.command == 'precompute':
-            run_precompute(config)
+            run_precompute(config, resume=args.resume)
         elif args.command == 'train':
             run_train(config)
+        elif args.command == 'train_ar':
+            run_train_ar(config)
         elif args.command == 'infer':
             if not all([args.original, args.edited, args.audio]):
                 print("ERROR: infer requires --original, --edited, and --audio")

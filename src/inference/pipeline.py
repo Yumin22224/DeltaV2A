@@ -325,6 +325,16 @@ class DeltaV2APipeline:
         # Step 5: Rendering
         output_audio = self.renderer.render(input_audio, params_dict)
 
+        # Volume normalization: match output RMS to input RMS.
+        # Consistent with DB build where A' was normalized before CLAP encoding.
+        rms_input = float(np.sqrt(np.mean(input_audio ** 2)))
+        rms_output = float(np.sqrt(np.mean(output_audio ** 2)))
+        if rms_output > 1e-8 and rms_input > 1e-8:
+            output_audio = output_audio * (rms_input / rms_output)
+            peak = float(np.abs(output_audio).max())
+            if peak > 1.0:
+                output_audio = output_audio / peak * 0.95
+
         return InferenceResult(
             z_visual=z_visual_np,
             top_k_img_terms=top_k_terms,

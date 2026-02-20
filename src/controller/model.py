@@ -47,7 +47,9 @@ class AudioController(nn.Module):
         self.use_activity_head = bool(use_activity_head)
         self.num_effects = int(num_effects) if num_effects is not None else 0
 
-        input_dim = audio_embed_dim + style_vocab_size
+        # When audio_embed_dim=0, the model operates in style-only mode:
+        # only the 24-dim style label is used as input (no CLAP concatenation).
+        input_dim = max(audio_embed_dim, 0) + style_vocab_size
 
         layers: List[nn.Module] = []
         in_dim = input_dim
@@ -74,7 +76,10 @@ class AudioController(nn.Module):
         audio_embed: torch.Tensor,
         style_label: torch.Tensor,
     ) -> torch.Tensor:
-        x = torch.cat([audio_embed, style_label], dim=-1)
+        if self.audio_embed_dim > 0:
+            x = torch.cat([audio_embed, style_label], dim=-1)
+        else:
+            x = style_label
         feat = self.backbone(x)
         params = torch.sigmoid(self.param_head(feat))
         return params
@@ -84,7 +89,10 @@ class AudioController(nn.Module):
         audio_embed: torch.Tensor,
         style_label: torch.Tensor,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        x = torch.cat([audio_embed, style_label], dim=-1)
+        if self.audio_embed_dim > 0:
+            x = torch.cat([audio_embed, style_label], dim=-1)
+        else:
+            x = style_label
         feat = self.backbone(x)
         params = torch.sigmoid(self.param_head(feat))
         activity_logits = None

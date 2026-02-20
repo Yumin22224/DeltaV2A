@@ -93,7 +93,7 @@ def _default_param_value(effect_name: str, param_name: str, min_val: float) -> f
     return BYPASS_PARAMS.get(effect_name, {}).get(param_name, min_val)
 
 
-def get_total_param_count(effect_names: List[str] = None) -> int:
+def get_total_param_count(effect_names: Optional[List[str]] = None) -> int:
     """Get total parameter count across selected effects."""
     if effect_names is None:
         effect_names = list(EFFECT_CATALOG.keys())
@@ -165,16 +165,68 @@ def denormalize_params(
     return params_dict
 
 
+def _bypass_normalized(spec: EffectParamSpec, bypass_actual: float) -> float:
+    """Return the normalized [0,1] position of a parameter's bypass value."""
+    if spec.scale == 'log':
+        log_min = np.log(max(spec.min_val, 1e-10))
+        log_max = np.log(spec.max_val)
+        return float(np.clip(
+            (np.log(max(bypass_actual, 1e-10)) - log_min) / (log_max - log_min + 1e-12),
+            0.0, 1.0,
+        ))
+    return float(np.clip(
+        (bypass_actual - spec.min_val) / (spec.max_val - spec.min_val + 1e-12),
+        0.0, 1.0,
+    ))
+
+
 def sample_random_params(
     effect_names: List[str],
-    rng: np.random.Generator = None,
+    rng: Optional[np.random.Generator] = None,
+    param_min_intensity: float = 0.0,
 ) -> Dict[str, Dict[str, float]]:
-    """Sample random parameters uniformly in normalized space."""
+    """Sample random parameters in normalized space.
+
+    Args:
+        param_min_intensity: When > 0, each parameter is sampled at least
+            this far (in normalized [0,1] space) from its bypass (neutral)
+            value, ensuring audibly stronger effects.
+            - Params whose bypass is near 0 → sampled from [min_intensity, 1]
+            - Params whose bypass is near 1 → sampled from [0, 1-min_intensity]
+            - Params whose bypass is in the middle (e.g. playback_rate) →
+              full [0, 1] range (already covers both directions)
+    """
     if rng is None:
         rng = np.random.default_rng()
-    total = get_total_param_count(effect_names)
-    normalized = rng.uniform(0.0, 1.0, size=total).astype(np.float32)
-    return denormalize_params(normalized, effect_names)
+
+    if param_min_intensity <= 0.0:
+        total = get_total_param_count(effect_names)
+        normalized = rng.uniform(0.0, 1.0, size=total).astype(np.float32)
+        return denormalize_params(normalized, effect_names)
+
+    parts: List[float] = []
+    for effect_name in effect_names:
+        spec = EFFECT_CATALOG[effect_name]
+        bypass_vals = BYPASS_PARAMS.get(effect_name, {})
+        for ps in spec.params:
+            bypass_actual = bypass_vals.get(ps.name, ps.min_val)
+            bp_norm = _bypass_normalized(ps, bypass_actual)
+            if bp_norm < 0.4:
+                # Bypass near min → strong effect = high normalized value
+                lo = float(np.clip(param_min_intensity, 0.0, 1.0))
+                hi = 1.0
+            elif bp_norm > 0.6:
+                # Bypass near max → strong effect = low normalized value
+                lo = 0.0
+                hi = float(np.clip(1.0 - param_min_intensity, 0.0, 1.0))
+            else:
+                # Bypass in middle (e.g. playback_rate at ~0.54) → full range
+                lo, hi = 0.0, 1.0
+            if lo >= hi:
+                lo, hi = 0.0, 1.0
+            parts.append(float(np.clip(rng.uniform(lo, hi), 0.0, 1.0)))
+
+    return denormalize_params(np.array(parts, dtype=np.float32), effect_names)
 
 
 class PedalboardRenderer:

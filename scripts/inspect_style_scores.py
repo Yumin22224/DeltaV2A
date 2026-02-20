@@ -46,6 +46,12 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--top-k", type=int, default=8)
     p.add_argument("--temperature", type=float, default=0.1)
+    p.add_argument(
+        "--use-delta-clap",
+        action="store_true",
+        default=False,
+        help="Recompute using delta CLAP(A')-CLAP(A) instead of absolute CLAP(A').",
+    )
     p.add_argument("--device", type=str, default="cpu")
     return p.parse_args()
 
@@ -108,6 +114,7 @@ def recompute_scores(
     indices: List[int],
     temperature: float,
     device: str,
+    use_delta_clap: bool = False,
 ) -> Dict[int, Dict[str, np.ndarray]]:
     from src.models.clap_embedder import CLAPEmbedder
 
@@ -150,6 +157,17 @@ def recompute_scores(
                 rec["probs_src"] = probs_src
                 rec["delta_sims"] = (sims_aug - sims_src).astype(np.float32)
                 rec["delta_probs"] = (probs_aug - probs_src).astype(np.float32)
+
+                if use_delta_clap:
+                    # Delta CLAP mode: compute style from embedding delta
+                    emb_delta = emb_aug - emb_src
+                    delta_norm = float(np.linalg.norm(emb_delta))
+                    if delta_norm > 0:
+                        emb_delta = emb_delta / delta_norm
+                    sims_delta_clap = vocab_embeddings @ emb_delta
+                    probs_delta_clap = _softmax(sims_delta_clap / float(temperature))
+                    rec["sims_delta_clap"] = sims_delta_clap.astype(np.float32)
+                    rec["probs_delta_clap"] = probs_delta_clap
 
         out[idx] = rec
     return out
@@ -222,6 +240,7 @@ def main() -> None:
             indices=indices,
             temperature=args.temperature,
             device=args.device,
+            use_delta_clap=args.use_delta_clap,
         )
 
     print(f"Indices: {indices}")
@@ -263,6 +282,11 @@ def main() -> None:
                     print("   ", line)
                 print("\n  [Delta: augmented - source | sim]")
                 for line in topk_delta_report(rec["delta_sims"], terms, keywords, args.top_k, largest=True):
+                    print("   ", line)
+
+            if "probs_delta_clap" in rec and "sims_delta_clap" in rec:
+                print("\n  [Delta CLAP: softmax(sim(CLAP(A')-CLAP(A), vocab) / T)]")
+                for line in topk_report(rec["probs_delta_clap"], rec["sims_delta_clap"], terms, keywords, args.top_k):
                     print("   ", line)
         elif args.mode in ("recompute", "both"):
             print("\n  [Recomputed from augmented audio] missing")
