@@ -155,16 +155,23 @@ def _apply_threshold_op(wimg, method_name: str, threshold: str):
 
 def apply_sepia_tone(image: Image.Image, intensity: float) -> Image.Image:
     t = _clamp01(intensity)
-    threshold = f"{_lerp(_SEPIA_THRESHOLD_MIN, _SEPIA_THRESHOLD_MAX, t):.2f}%"
-    return _apply_wand(image, lambda wimg: _apply_threshold_op(wimg, "sepia_tone", threshold))
+    # wand.sepia_tone expects threshold in [0.0, 1.0] (multiplied by QuantumRange internally).
+    threshold = _lerp(_SEPIA_THRESHOLD_MIN, _SEPIA_THRESHOLD_MAX, t) / 100.0
+    return _apply_wand(image, lambda wimg: wimg.sepia_tone(threshold=threshold))
 
 
 def apply_solarize(image: Image.Image, intensity: float) -> Image.Image:
     t = _clamp01(intensity)
-    # Higher intensity => lower threshold (stronger solarization)
-    threshold_val = _lerp(_SOLARIZE_THRESHOLD_MAX, _SOLARIZE_THRESHOLD_MIN, t)
-    threshold = f"{threshold_val:.2f}%"
-    return _apply_wand(image, lambda wimg: _apply_threshold_op(wimg, "solarize", threshold))
+    # Higher intensity => lower threshold (stronger solarization).
+    # wand.solarize expects threshold in raw QuantumRange units (0 to wimg.quantum_range),
+    # unlike sepia_tone which normalizes internally. Read quantum_range from wand at apply time.
+    threshold_pct = _lerp(_SOLARIZE_THRESHOLD_MAX, _SOLARIZE_THRESHOLD_MIN, t)
+
+    def _op(wimg):
+        qr = wimg.quantum_range
+        wimg.solarize(threshold=threshold_pct / 100.0 * qr)
+
+    return _apply_wand(image, _op)
 
 
 IMAGE_EFFECTS = {

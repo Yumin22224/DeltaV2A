@@ -32,6 +32,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-duration", type=float, default=20.0)
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--manifest-path", type=str, default="data/augmented/pipeline/audio/manifest.jsonl")
+    parser.add_argument(
+        "--render-selection",
+        type=str,
+        default="best_worst",
+        choices=["random", "top_mae", "best_worst"],
+    )
+    parser.add_argument("--render-seed", type=int, default=42)
     parser.add_argument("--hidden-dims", type=int, nargs="+", default=[512, 256, 128])
     parser.add_argument("--dropout", type=float, default=0.1)
     return parser.parse_args()
@@ -50,6 +57,8 @@ def main():
         max_duration=args.max_duration,
         device=args.device,
         manifest_path=args.manifest_path,
+        render_selection=args.render_selection,
+        render_seed=args.render_seed,
         hidden_dims=args.hidden_dims,
         dropout=args.dropout,
     )

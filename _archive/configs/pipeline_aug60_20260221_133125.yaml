@@ -1,0 +1,178 @@
+device: cuda
+data:
+  audio_dir: data/original/audio
+  audio_list: null
+  audio_split_manifest: data/original/splits/manifest.jsonl
+  audio_split: train
+  image_dir: data/original/images
+  max_audio_files: null
+  max_image_files: null
+  save_augmented_audio: true
+  augmented_audio_dir: data/augmented/runs/aug60_20260221_133125/audio
+model:
+  clip:
+    name: ViT-L-14
+    pretrained: openai
+  clap:
+    model_id: 1
+    enable_fusion: false
+    max_duration: 20.0
+    sample_rate: 48000
+vocab:
+  img_terms: null
+  aud_terms: null
+inverse_mapping:
+  use_delta_clap: true
+  augmentations_per_audio: 60
+  temperature: 0.1
+  seed: 42
+  min_active_effects: 1
+  max_active_effects: 2
+  param_min_intensity: 0.35
+  param_mid_bypass_exclusion: 0.15
+  delta_min_norm: 0.06
+  delta_resample_attempts: 3
+  effect_sampling_weights:
+    lowpass: 1.0
+    bitcrush: 1.0
+    reverb: 1.0
+    highpass: 1.0
+    distortion: 1.0
+    playback_rate: 1.0
+    delay: 1.0
+image_inverse_mapping:
+  augmentations_per_image: 2
+  effect_types:
+  - adaptive_blur
+  - motion_blur
+  - adaptive_sharpen
+  - add_noise
+  - spread
+  - sepia_tone
+  - solarize
+  intensity_min: 0.1
+  intensity_max: 1.0
+  seed: 42
+  save_augmented_images: false
+  augmented_image_dir: data/augmented/pipeline/images
+effects:
+  active:
+  - lowpass
+  - bitcrush
+  - reverb
+  - highpass
+  - distortion
+  - playback_rate
+  - delay
+controller:
+  audio_embed_dim: 0
+  hidden_dims:
+  - 256
+  - 256
+  - 128
+  dropout: 0.3
+  weight_decay: 0.001
+  lr_scheduler: cosine
+  lr_min: 1.0e-06
+  use_activity_head: true
+  activity_loss_weight: 0.5
+  activity_mismatch_weight: 2.0
+  activity_mismatch_gamma: 2.0
+  activity_loss_type: asl
+  focal_gamma: 2.0
+  asl_gamma_pos: 0.0
+  asl_gamma_neg: 4.0
+  asl_clip: 0.05
+  param_loss_weight: 1.0
+  inactive_param_weight: 0.0
+  param_loss_type: huber
+  huber_delta: 0.02
+  selection_metric: val_active_param_rmse
+  train_backbone: true
+  train_param_head: true
+  train_activity_head: true
+  balanced_sampler:
+    enabled: true
+    mode: inverse_frequency
+    effects:
+    - lowpass
+    - bitcrush
+    - reverb
+    - highpass
+    - distortion
+    - playback_rate
+    - delay
+    boost: 2.0
+    base_weight: 1.0
+  effect_loss_weights:
+    lowpass: 1.0
+    bitcrush: 1.5
+    reverb: 1.0
+    highpass: 1.0
+    distortion: 1.0
+    playback_rate: 1.5
+    delay: 2.0
+  batch_size: 256
+  num_epochs: 150
+  learning_rate: 0.0001
+  val_split: 0.2
+  training_stages:
+  - name: joint_from_scratch
+    epochs: 150
+    learning_rate: 0.0001
+    lr_scheduler_type: cosine
+    lr_min: 1.0e-06
+    activity_loss_weight: 0.5
+    activity_mismatch_weight: 2.0
+    activity_mismatch_gamma: 2.0
+    activity_loss_type: asl
+    param_loss_weight: 1.0
+    train_backbone: true
+    train_param_head: true
+    train_activity_head: true
+    selection_metric: val_active_param_rmse
+  post_train_analysis:
+    enabled: true
+    out_dir: null
+    val_split: null
+    split_seed: 42
+    batch_size: 128
+    num_renders: 5
+    sample_rate: null
+    max_duration: null
+    device: null
+    manifest_path: null
+    hidden_dims: null
+    dropout: null
+ar_controller:
+  condition_dim: 256
+  hidden_dim: 512
+  dropout: 0.1
+  max_steps: 2
+  clap_embed_dim: 512
+  num_epochs: 150
+  batch_size: 256
+  learning_rate: 0.0001
+  weight_decay: 0.001
+  val_split: 0.2
+  seed: 42
+  effect_loss_weight: 1.0
+  param_loss_weight: 50.0
+  huber_delta: 0.02
+  lr_scheduler: cosine
+  lr_min: 1.0e-06
+visual_encoder:
+  enabled: false
+  projection_dim: 768
+  dropout: 0.1
+  training:
+    enabled: false
+    batch_size: 32
+    num_epochs: 40
+    learning_rate: 0.0001
+    val_split: 0.2
+    seed: 42
+inference:
+  top_k: 5
+output:
+  dir: outputs/runs/aug60_20260221_133125

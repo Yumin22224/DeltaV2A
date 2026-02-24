@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls data/original/images/ ls data/original/images/**/*)"
+    ]
+  }
+}

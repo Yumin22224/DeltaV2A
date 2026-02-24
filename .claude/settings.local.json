@@ -7,7 +7,18 @@
       "Bash(python:*)",
       "Bash(pip install:*)",
       "Bash(./venv_DeltaV2A/bin/python:*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(./venv_DeltaV2A/Scripts/python.exe:*)",
+      "Bash(\"d:/MARG/DeltaV2A/venv_DeltaV2A/bin/python\" -c \"import torch; print\\(''CUDA:'', torch.cuda.is_available\\(\\)\\); print\\(''Device name:'', torch.cuda.get_device_name\\(0\\) if torch.cuda.is_available\\(\\) else ''N/A''\\)\")",
+      "Bash(py:*)",
+      "Bash(for attempt in attempt5_20260223_000500 attempt6_20260223_021500 attempt7_20260223_190500 attempt8_20260224_101500)",
+      "Bash(do)",
+      "Bash(echo:*)",
+      "Bash(f=\"d:/MARG/DeltaV2A/outputs/attempts/$attempt/run/controller/training_stages_summary.json\")",
+      "Bash(if [ -f \"$f\" ])",
+      "Bash(then)",
+      "Bash(fi)",
+      "Bash(done)"
     ]
   }
 }

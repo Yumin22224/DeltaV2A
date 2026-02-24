@@ -37,6 +37,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--h5", type=str, default="outputs/pipeline/inverse_mapping.h5")
     p.add_argument("--aud-vocab", type=str, default="outputs/pipeline/aud_vocab.npz")
     p.add_argument("--out-dir", type=str, default="outputs/pipeline/controller/analysis/style_diagnosis")
+    p.add_argument(
+        "--controller-report",
+        type=str,
+        default=None,
+        help=(
+            "Path to controller analysis_report.json for baseline comparison. "
+            "If omitted, controller-vs-baselines section is skipped."
+        ),
+    )
     p.add_argument("--seed", type=int, default=42)
     return p.parse_args()
 
@@ -269,6 +278,12 @@ def linear_probe_params(
     idx_tr, idx_te = train_test_split(
         np.arange(len(style_labels)), test_size=0.2, random_state=seed,
     )
+    mask_te = effect_mask[idx_te]
+
+    # Expand effect-level active mask to param-level mask.
+    param_active_mask_te = np.zeros((len(idx_te), len(param_names)), dtype=np.float32)
+    for pi, ei in enumerate(param_effect_idx):
+        param_active_mask_te[:, pi] = (mask_te[:, ei] > 0.5).astype(np.float32)
 
     inputs = {
         "style_only": style_labels,
@@ -282,7 +297,6 @@ def linear_probe_params(
         X_te = X_all[idx_te]
         Y_tr = normalized_params[idx_tr]
         Y_te = normalized_params[idx_te]
-        mask_te = effect_mask[idx_te]
 
         model = Ridge(alpha=1.0)
         model.fit(X_tr, Y_tr)
@@ -290,6 +304,10 @@ def linear_probe_params(
 
         # Overall RMSE
         overall_rmse = float(np.sqrt(np.mean((Y_pred - Y_te) ** 2)))
+        active_denom = float(np.maximum(param_active_mask_te.sum(), 1.0))
+        active_only_rmse = float(
+            np.sqrt(np.sum(((Y_pred - Y_te) ** 2) * param_active_mask_te) / active_denom)
+        )
 
         # Per-param RMSE (active only)
         per_param = {}
@@ -303,6 +321,7 @@ def linear_probe_params(
 
         results[input_name] = {
             "overall_rmse": overall_rmse,
+            "active_only_rmse": active_only_rmse,
             "per_param": per_param,
         }
 
@@ -311,6 +330,10 @@ def linear_probe_params(
     Y_te_base = normalized_params[idx_te]
     mean_pred = np.tile(Y_tr_base.mean(axis=0), (len(idx_te), 1))
     baseline_rmse = float(np.sqrt(np.mean((mean_pred - Y_te_base) ** 2)))
+    active_denom = float(np.maximum(param_active_mask_te.sum(), 1.0))
+    baseline_active_rmse = float(
+        np.sqrt(np.sum(((mean_pred - Y_te_base) ** 2) * param_active_mask_te) / active_denom)
+    )
 
     per_param_baseline = {}
     for pi, pname in enumerate(param_names):
@@ -323,6 +346,7 @@ def linear_probe_params(
 
     results["mean_baseline"] = {
         "overall_rmse": baseline_rmse,
+        "active_only_rmse": baseline_active_rmse,
         "per_param": per_param_baseline,
     }
 
@@ -413,21 +437,40 @@ def controller_vs_baselines(
     with open(report_path) as f:
         report = json.load(f)
 
-    ctrl_rmse = report["val_summary"]["overall_rmse"]
+    val_summary = report.get("val_summary", {})
+    ctrl_rmse_aligned = val_summary.get(
+        "selection_aligned_active_param_rmse",
+        val_summary.get("active_only_rmse_gated", val_summary.get("active_only_rmse")),
+    )
+    if ctrl_rmse_aligned is None:
+        ctrl_rmse_aligned = val_summary.get("overall_rmse")
+
     probes = probe_results["probe_results"]
 
     comparison = {
-        "controller_rmse": ctrl_rmse,
+        "controller_rmse": ctrl_rmse_aligned,
+        "controller_active_only_rmse": ctrl_rmse_aligned,
+        "controller_overall_rmse": val_summary.get("overall_rmse"),
         "mean_baseline_rmse": probes["mean_baseline"]["overall_rmse"],
         "linear_style_only_rmse": probes["style_only"]["overall_rmse"],
         "linear_clap_only_rmse": probes["clap_only"]["overall_rmse"],
         "linear_clap_style_rmse": probes["clap+style"]["overall_rmse"],
+        "mean_baseline_active_only_rmse": probes["mean_baseline"].get("active_only_rmse"),
+        "linear_style_only_active_only_rmse": probes["style_only"].get("active_only_rmse"),
+        "linear_clap_only_active_only_rmse": probes["clap_only"].get("active_only_rmse"),
+        "linear_clap_style_active_only_rmse": probes["clap+style"].get("active_only_rmse"),
     }
 
     # Per-param comparison
     per_param = {}
     param_names = probe_results["param_names"]
-    ctrl_params = {p["param"]: p["rmse"] for p in report["val_summary"]["top5_highest_rmse"]}
+    ctrl_top = val_summary.get("top5_highest_active_rmse_gated", val_summary.get("top5_highest_rmse", []))
+    ctrl_params = {}
+    for p in ctrl_top:
+        pname = p.get("param")
+        if not pname:
+            continue
+        ctrl_params[pname] = p.get("active_rmse_gated", p.get("active_rmse", p.get("rmse")))
 
     for pname in param_names:
         entry = {}
@@ -519,15 +562,15 @@ def save_plots(
     probes = probe_params_result["probe_results"]
     methods = ["mean_baseline", "style_only", "clap_only", "clap+style"]
     labels = ["Mean baseline", "Style only", "CLAP only", "CLAP+Style"]
-    rmses = [probes[m]["overall_rmse"] for m in methods]
+    rmses = [probes[m].get("active_only_rmse", probes[m]["overall_rmse"]) for m in methods]
 
     fig, ax = plt.subplots(figsize=(8, 4))
     bars = ax.bar(labels, rmses, color=["gray", "tab:orange", "tab:blue", "tab:green"], alpha=0.8)
     for bar, v in zip(bars, rmses):
         ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.005,
                 f"{v:.3f}", ha="center", va="bottom", fontsize=10)
-    ax.set_ylabel("Overall RMSE")
-    ax.set_title("Linear Probe: Param Prediction RMSE by Input")
+    ax.set_ylabel("Active-only RMSE")
+    ax.set_title("Linear Probe: Param Prediction (Active-only RMSE)")
     fig.tight_layout()
     fig.savefig(out_dir / "4_probe_comparison.png", dpi=150)
     plt.close(fig)
@@ -651,8 +694,12 @@ def main():
     )
     all_results["probe_params"] = probe_params
     for method in ["mean_baseline", "style_only", "clap_only", "clap+style"]:
-        rmse = probe_params["probe_results"][method]["overall_rmse"]
-        print(f"  {method:20s}: overall RMSE = {rmse:.4f}")
+        rmse_overall = probe_params["probe_results"][method]["overall_rmse"]
+        rmse_active = probe_params["probe_results"][method].get("active_only_rmse", rmse_overall)
+        print(
+            f"  {method:20s}: overall RMSE = {rmse_overall:.4f}, "
+            f"active-only RMSE = {rmse_active:.4f}"
+        )
 
     # ── Test 5: Consistency ──
     print("\n[5/6] Consistency check...")
@@ -671,15 +718,18 @@ def main():
 
     # ── Test 6: Controller vs baselines ──
     print("\n[6/6] Controller vs baselines...")
-    report_path = "outputs/pipeline/controller/analysis/analysis_report.json"
-    comparison = controller_vs_baselines(report_path, probe_params)
-    all_results["controller_vs_baselines"] = comparison
-    if "error" not in comparison:
-        print(f"  Controller RMSE:    {comparison['controller_rmse']:.4f}")
-        print(f"  Mean baseline RMSE: {comparison['mean_baseline_rmse']:.4f}")
-        print(f"  Linear style RMSE:  {comparison['linear_style_only_rmse']:.4f}")
-        print(f"  Linear CLAP RMSE:   {comparison['linear_clap_only_rmse']:.4f}")
-        print(f"  Linear both RMSE:   {comparison['linear_clap_style_rmse']:.4f}")
+    if args.controller_report:
+        comparison = controller_vs_baselines(args.controller_report, probe_params)
+        all_results["controller_vs_baselines"] = comparison
+        if "error" not in comparison:
+            print(f"  Controller active RMSE: {comparison['controller_active_only_rmse']:.4f}")
+            print(f"  Mean baseline active RMSE: {comparison['mean_baseline_active_only_rmse']:.4f}")
+            print(f"  Linear style active RMSE:  {comparison['linear_style_only_active_only_rmse']:.4f}")
+            print(f"  Linear CLAP active RMSE:   {comparison['linear_clap_only_active_only_rmse']:.4f}")
+            print(f"  Linear both active RMSE:   {comparison['linear_clap_style_active_only_rmse']:.4f}")
+    else:
+        all_results["controller_vs_baselines"] = {"skipped": True, "reason": "controller report not provided"}
+        print("  Skipped (no --controller-report provided).")
 
     # ── Save results ──
     report_out = out_dir / "diagnosis_report.json"
@@ -731,9 +781,9 @@ def main():
         )
 
     probe_rmse = probe_params["probe_results"]
-    baseline_rmse = probe_rmse["mean_baseline"]["overall_rmse"]
-    style_rmse = probe_rmse["style_only"]["overall_rmse"]
-    both_rmse = probe_rmse["clap+style"]["overall_rmse"]
+    baseline_rmse = probe_rmse["mean_baseline"].get("active_only_rmse", probe_rmse["mean_baseline"]["overall_rmse"])
+    style_rmse = probe_rmse["style_only"].get("active_only_rmse", probe_rmse["style_only"]["overall_rmse"])
+    both_rmse = probe_rmse["clap+style"].get("active_only_rmse", probe_rmse["clap+style"]["overall_rmse"])
     if style_rmse > baseline_rmse * 0.95:
         issues.append(
             f"CRITICAL: Linear probe with style labels (RMSE={style_rmse:.4f}) "

@@ -4,15 +4,13 @@ DeltaV2A Pipeline Runner (Phase A-C)
 
 Commands:
   precompute    - Phase A: Build vocab + inverse mapping DBs (music/image)
-  train         - Phase B: Train MLP controller + optional Siamese visual encoder
-  train_ar      - Phase B: Train AR Hybrid controller
+  train         - Phase B: Train MLP controller
   infer         - Phase C: Run inference (I, I', A) -> A'
-  all           - precompute + train + train_ar
+  all           - precompute + train
 
 Usage:
     python scripts/run_pipeline.py precompute --config configs/pipeline.yaml
     python scripts/run_pipeline.py train --config configs/pipeline.yaml
-    python scripts/run_pipeline.py train_ar --config configs/pipeline.yaml
     python scripts/run_pipeline.py infer --config configs/pipeline.yaml \\
         --original img_orig.jpg --edited img_edit.jpg \\
         --audio input.wav --output output.wav
@@ -35,7 +33,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 def load_config(config_path: str) -> dict:
     print(f"Loading config from {config_path}...")
-    with open(config_path, 'r') as f:
+    with open(config_path, 'r', encoding='utf-8') as f:
         return yaml.safe_load(f)
 
 
@@ -182,14 +180,17 @@ def run_precompute(config: dict, resume: bool = False):
     print("=" * 60)
 
     vocab = StyleVocabulary()
+    vocab_cfg = config.get('vocab', {})
+    img_prompt_templates = vocab_cfg.get('img_prompt_templates')
+    aud_prompt_templates = vocab_cfg.get('aud_prompt_templates')
     aud_vocab_path = output_dir / "aud_vocab.npz"
     img_vocab_path = output_dir / "img_vocab.npz"
     if resume and aud_vocab_path.exists() and img_vocab_path.exists():
         vocab.load(str(output_dir))
         print("Loaded existing vocab (resume mode).")
     else:
-        vocab.build_img_vocab(clip)
-        vocab.build_aud_vocab(clap)
+        vocab.build_img_vocab(clip, prompt_templates=img_prompt_templates)
+        vocab.build_aud_vocab(clap, prompt_templates=aud_prompt_templates)
         vocab.save(str(output_dir))
 
     # --- Phase A-2: Inverse Mapping Database (Music) ---
@@ -223,6 +224,14 @@ def run_precompute(config: dict, resume: bool = False):
             use_delta_clap=inv_cfg.get('use_delta_clap', True),
             resume=resume,
             param_min_intensity=float(inv_cfg.get('param_min_intensity', 0.0)),
+            delta_min_norm=float(inv_cfg.get('delta_min_norm', 0.0)),
+            delta_resample_attempts=int(inv_cfg.get('delta_resample_attempts', 1)),
+            param_mid_bypass_exclusion=float(inv_cfg.get('param_mid_bypass_exclusion', 0.0)),
+            single_effect_ratio=float(inv_cfg.get('single_effect_ratio', 0.0)),
+            label_entropy_max_bits=inv_cfg.get('label_entropy_max_bits'),
+            label_top1_min_mass=float(inv_cfg.get('label_top1_min_mass', 0.0)),
+            label_min_margin=float(inv_cfg.get('label_min_margin', 0.0)),
+            label_resample_attempts=int(inv_cfg.get('label_resample_attempts', 1)),
         )
 
     # --- Phase A-3: Inverse Mapping Database (Image) ---
@@ -303,7 +312,6 @@ def run_train(config: dict):
     """Phase B: Train controller + optional Siamese visual encoder."""
     from src.controller import train_controller, run_controller_post_train_analysis
     from src.effects.pedalboard_effects import get_total_param_count
-    from src.inference import train_visual_encoder
     from src.vocab import StyleVocabulary
     from src.models import CLIPEmbedder
 
@@ -338,6 +346,8 @@ def run_train(config: dict):
             audio_embed_dim=int(ctrl_cfg.get('audio_embed_dim', 512)),
             hidden_dims=ctrl_cfg.get('hidden_dims'),
             dropout=ctrl_cfg.get('dropout', 0.1),
+            fusion_mode=str(ctrl_cfg.get('fusion_mode', 'concat')),
+            audio_gate_bias=float(ctrl_cfg.get('audio_gate_bias', -2.0)),
             use_activity_head=bool(ctrl_cfg.get('use_activity_head', False)),
             activity_loss_weight=float(ctrl_cfg.get('activity_loss_weight', 0.0)),
             activity_mismatch_weight=float(ctrl_cfg.get('activity_mismatch_weight', 0.0)),
@@ -348,6 +358,7 @@ def run_train(config: dict):
             asl_gamma_neg=float(ctrl_cfg.get('asl_gamma_neg', 4.0)),
             asl_clip=float(ctrl_cfg.get('asl_clip', 0.05)),
             param_loss_weight=float(ctrl_cfg.get('param_loss_weight', 1.0)),
+            fp_param_weight=float(ctrl_cfg.get('fp_param_weight', 0.0)),
             inactive_param_weight=float(ctrl_cfg.get('inactive_param_weight', 1.0)),
             param_loss_type=str(ctrl_cfg.get('param_loss_type', 'mse')),
             huber_delta=float(ctrl_cfg.get('huber_delta', 0.05)),
@@ -360,6 +371,13 @@ def run_train(config: dict):
             train_activity_head=bool(ctrl_cfg.get('train_activity_head', True)),
             lr_scheduler_type=str(ctrl_cfg.get('lr_scheduler', 'none')),
             lr_min=float(ctrl_cfg.get('lr_min', 1e-6)),
+            confidence_weighting_enabled=bool(ctrl_cfg.get('confidence_weighting_enabled', False)),
+            confidence_weight_power=float(ctrl_cfg.get('confidence_weight_power', 1.0)),
+            confidence_min_weight=float(ctrl_cfg.get('confidence_min_weight', 0.2)),
+            confidence_use_delta_norm=bool(ctrl_cfg.get('confidence_use_delta_norm', False)),
+            confidence_style_alpha=float(ctrl_cfg.get('confidence_style_alpha', 1.0)),
+            confidence_delta_scale=float(ctrl_cfg.get('confidence_delta_scale', 1.0)),
+            threshold_tuning=ctrl_cfg.get('threshold_tuning'),
             device=config.get('device', 'cpu'),
         )
 
@@ -397,13 +415,15 @@ def run_train(config: dict):
                     val_split=float(_pick('val_split', ctrl_cfg.get('val_split', 0.2))),
                     split_seed=int(_pick('split_seed', 42)),
                     batch_size=int(_pick('batch_size', 128)),
-                    num_renders=int(_pick('num_renders', 5)),
+                    num_renders=int(_pick('num_renders', 4)),
                     sample_rate=int(_pick('sample_rate', config['model']['clap'].get('sample_rate', 48000))),
                     max_duration=float(_pick('max_duration', config['model']['clap'].get('max_duration', 20.0))),
                     device=str(_pick('device', config.get('device', 'cpu'))),
                     manifest_path=manifest_path,
                     hidden_dims=_pick('hidden_dims', ctrl_cfg.get('hidden_dims', [512, 256, 128])),
                     dropout=float(_pick('dropout', ctrl_cfg.get('dropout', 0.1))),
+                    render_selection=str(_pick('render_selection', 'best_worst')),
+                    render_seed=int(_pick('render_seed', 42)),
                 )
                 report_path = Path(analysis_report['val_metrics_summary_json']).parent / "analysis_report.json"
                 print(f"Controller analysis report: {report_path}")
@@ -419,6 +439,7 @@ def run_train(config: dict):
         print("PHASE B-2: VISUAL SIAMESE DISABLED (visual_encoder.enabled=false)")
         print("=" * 60)
     elif ve_cfg.get('enabled', True):
+        from src.inference import train_visual_encoder
         print("\n" + "=" * 60)
         print("PHASE B-2: TRAIN VISUAL SIAMESE ENCODER")
         print("=" * 60)
@@ -464,12 +485,15 @@ def run_train(config: dict):
 
 
 # =============================================================================
-# COMMAND: TRAIN AR (Phase B-AR)
+# COMMAND: TRAIN AR (Phase B-AR) -- ARCHIVED (attempt9+: MLP only)
 # =============================================================================
 
 def run_train_ar(config: dict):
-    """Phase B-AR: Train AR Hybrid Controller."""
-    from src.controller import train_ar_controller
+    """AR controller has been archived. MLP (train command) is used exclusively."""
+    print("=" * 60)
+    print("NOTE: AR controller is archived (attempt9+). Use 'train' command for MLP.")
+    print("=" * 60)
+    return
 
     output_dir = Path(config['output']['dir'])
     db_path = output_dir / "inverse_mapping.h5"
@@ -505,6 +529,7 @@ def run_train_ar(config: dict):
         hidden_dim=int(ar_cfg.get('hidden_dim', 256)),
         dropout=float(ar_cfg.get('dropout', 0.1)),
         max_steps=int(ar_cfg.get('max_steps', 2)),
+        clap_embed_dim=int(ar_cfg.get('clap_embed_dim', 0)),
         # Training
         num_epochs=int(ar_cfg.get('num_epochs', 150)),
         batch_size=int(ar_cfg.get('batch_size', 256)),
@@ -517,10 +542,58 @@ def run_train_ar(config: dict):
         effect_loss_weight=float(ar_cfg.get('effect_loss_weight', 1.0)),
         param_loss_weight=float(ar_cfg.get('param_loss_weight', 1.0)),
         huber_delta=float(ar_cfg.get('huber_delta', 0.02)),
+        auto_effect_class_weights=bool(ar_cfg.get('auto_effect_class_weights', False)),
+        effect_class_weight_power=float(ar_cfg.get('effect_class_weight_power', 0.5)),
+        effect_class_weight_min=float(ar_cfg.get('effect_class_weight_min', 0.5)),
+        effect_class_weight_max=float(ar_cfg.get('effect_class_weight_max', 3.0)),
+        effect_ce_label_smoothing=float(ar_cfg.get('effect_ce_label_smoothing', 0.0)),
+        param_effect_weights=ar_cfg.get('param_effect_weights'),
+        confidence_weighting_enabled=bool(ar_cfg.get('confidence_weighting_enabled', False)),
+        confidence_weight_power=float(ar_cfg.get('confidence_weight_power', 1.0)),
+        confidence_min_weight=float(ar_cfg.get('confidence_min_weight', 0.2)),
+        confidence_use_delta_norm=bool(ar_cfg.get('confidence_use_delta_norm', False)),
+        confidence_style_alpha=float(ar_cfg.get('confidence_style_alpha', 1.0)),
+        confidence_delta_scale=float(ar_cfg.get('confidence_delta_scale', 1.0)),
         # LR schedule
         lr_scheduler_type=str(ar_cfg.get('lr_scheduler', 'cosine')),
         lr_min=float(ar_cfg.get('lr_min', 1e-6)),
     )
+
+    analysis_cfg = ar_cfg.get('post_train_analysis', {})
+    if analysis_cfg.get('enabled', True):
+        print("\n" + "=" * 60)
+        print("PHASE B-AR-1: AR CONTROLLER POST-TRAIN ANALYSIS")
+        print("=" * 60)
+        try:
+            def _pick_ar(name, default):
+                val = analysis_cfg.get(name, None)
+                return default if val is None else val
+
+            ar_manifest_path = analysis_cfg.get('manifest_path')
+            if ar_manifest_path is None:
+                aug_audio_dir = config.get('data', {}).get('augmented_audio_dir')
+                if aug_audio_dir:
+                    ar_manifest_path = str(Path(aug_audio_dir) / "manifest.jsonl")
+
+            analysis_report = run_ar_post_train_analysis(
+                artifacts_dir=str(output_dir),
+                out_dir=analysis_cfg.get('out_dir'),
+                val_split=float(_pick_ar('val_split', ar_cfg.get('val_split', 0.2))),
+                split_seed=int(_pick_ar('split_seed', ar_cfg.get('seed', 42))),
+                sample_rate=int(_pick_ar('sample_rate', config['model']['clap'].get('sample_rate', 48000))),
+                max_duration=float(_pick_ar('max_duration', config['model']['clap'].get('max_duration', 20.0))),
+                device=str(_pick_ar('device', config.get('device', 'cpu'))),
+                manifest_path=ar_manifest_path,
+                num_renders=int(_pick_ar('num_renders', 4)),
+                render_seed=int(_pick_ar('render_seed', 42)),
+                render_selection=str(_pick_ar('render_selection', 'best_worst')),
+            )
+            report_path = Path(analysis_report["loss_curve_path"]).parent / "analysis_report.json"
+            print(f"AR analysis report: {report_path}")
+            print(f"  Best val loss: {analysis_report['curve_summary']['best_val_loss']:.6f}")
+            print(f"  Best epoch: {analysis_report['curve_summary']['best_epoch']}")
+        except Exception as e:
+            print(f"WARNING: AR post-train analysis failed: {e}")
 
     print("\n" + "=" * 60)
     print("PHASE B-AR COMPLETE")
@@ -541,12 +614,24 @@ def run_infer(config: dict, args):
 
     print("\nLoading pipeline...")
     use_siamese_visual_encoder = bool(config.get('visual_encoder', {}).get('enabled', True))
+    infer_cfg = config.get('inference', {})
+    style_temperature = float(infer_cfg.get('style_temperature', 0.1))
+    act_override_raw = infer_cfg.get('activity_threshold_override', None)
+    activity_threshold_override = float(act_override_raw) if act_override_raw is not None else None
+    norm_conf_thr_raw = infer_cfg.get('norm_confidence_threshold', None)
+    norm_conf_sc_raw = infer_cfg.get('norm_confidence_scale', None)
+    norm_confidence_threshold = float(norm_conf_thr_raw) if norm_conf_thr_raw is not None else None
+    norm_confidence_scale = float(norm_conf_sc_raw) if norm_conf_sc_raw is not None else None
     pipeline = DeltaV2APipeline.load(
         artifacts_dir=str(output_dir),
         clip_embedder=clip,
         clap_embedder=clap,
         device=config.get('device', 'cpu'),
         use_siamese_visual_encoder=use_siamese_visual_encoder,
+        style_temperature=style_temperature,
+        activity_threshold_override=activity_threshold_override,
+        norm_confidence_threshold=norm_confidence_threshold,
+        norm_confidence_scale=norm_confidence_scale,
     )
 
     print("\nRunning inference...")
@@ -571,12 +656,11 @@ def run_infer(config: dict, args):
 # =============================================================================
 
 def run_all(config: dict):
-    """Run precompute + train + train_ar."""
+    """Run precompute + train (MLP only)."""
     run_precompute(config)
     run_train(config)
-    run_train_ar(config)
     print("\n" + "=" * 60)
-    print("ALL PHASES COMPLETE (A + B + B-AR)")
+    print("ALL PHASES COMPLETE (A + B MLP)")
     print("=" * 60)
 
 
@@ -593,7 +677,7 @@ def main():
 
     parser.add_argument(
         'command',
-        choices=['precompute', 'train', 'train_ar', 'infer', 'all'],
+        choices=['precompute', 'train', 'infer', 'all'],
         help="Command to run",
     )
     parser.add_argument('--config', type=str, default='configs/pipeline.yaml')

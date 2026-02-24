@@ -1,6 +1,6 @@
 # DeltaV2A Pipeline Configuration (Phase A-C)
 
-device: "mps"
+device: "cuda"
 
 # === Data ===
 data:
@@ -34,6 +34,18 @@ model:
 vocab:
   img_terms: null # null = use default IMG_VOCAB_TERMS
   aud_terms: null # null = use default AUD_VOCAB_TERMS
+  # Prompt-template ensemble for img_vocab (8 templates -> more discriminative CLIP embeddings).
+  # These produce averaged embeddings that better separate the 24 style axes.
+  img_prompt_templates:
+    - "a {word} image"
+    - "a {word} photograph"
+    - "an image with a {word} mood"
+    - "a {word} visual style"
+    - "a {word} scene"
+    - "a {word} picture"
+    - "a photo that feels {word}"
+    - "artwork with a {word} atmosphere"
+  aud_prompt_templates: null
 
 # === Phase A-2: Inverse Mapping Database (Music / Controller) ===
 inverse_mapping:
@@ -48,6 +60,23 @@ inverse_mapping:
   # - Params with bypass at 0 (e.g. reverb wet_level, delay mix): sampled from [min, 1]
   # - Params with bypass at 1 (e.g. bitcrush bit_depth, lowpass cutoff): sampled from [0, 1-min]
   param_min_intensity: 0.35
+  # For middle-bypass params (e.g. playback_rate around 1.0x), exclude a dead-zone
+  # around bypass to avoid weak/no-op samples.
+  param_mid_bypass_exclusion: 0.15
+  # Delta-CLAP SNR controls:
+  # - reject low-norm deltas and resample up to delta_resample_attempts
+  # - if all attempts fail, keep the highest-norm candidate (preserves record count)
+  delta_min_norm: 0.06
+  delta_resample_attempts: 3
+  # Force a higher share of single-effect samples when range includes 1.
+  # 0.0 = no bias, 1.0 = always single-effect.
+  single_effect_ratio: 0.0
+  # Optional label-quality filters for style soft labels.
+  # entropy uses bits; set null to disable.
+  label_entropy_max_bits: null
+  label_top1_min_mass: 0.0
+  label_min_margin: 0.0
+  label_resample_attempts: 1
   # Weighted effect sampling for active-effect selection in Phase A-3.
   # Higher value -> selected more frequently.
   effect_sampling_weights:
@@ -94,12 +123,17 @@ controller:
   # Style-only input: CLAP embedding adds near-zero info (probe shows clap_only ≈ mean baseline).
   # Setting audio_embed_dim=0 removes 512-dim noise and forces the model to rely on
   # the 24-dim delta-CLAP style label which does carry useful signal.
-  audio_embed_dim: 0
+  audio_embed_dim: 512
+  fusion_mode: "gated_residual" # one of: concat, gated_residual
+  audio_gate_bias: -2.0
   hidden_dims: [256, 256, 128]
   dropout: 0.3
   weight_decay: 0.001
   lr_scheduler: "cosine"
   lr_min: 1.0e-6
+  confidence_weighting_enabled: false
+  confidence_weight_power: 1.0
+  confidence_min_weight: 0.2
   use_activity_head: true
   activity_loss_weight: 0.5
   activity_mismatch_weight: 2.0
@@ -114,7 +148,7 @@ controller:
   param_loss_type: "huber" # one of: mse, huber
   huber_delta: 0.02
   # Focus selection on param quality (previously activity F1 caused stage-1 local minimum)
-  selection_metric: "val_active_param_rmse"
+  selection_metric: "val_active_param_rmse_gated"
   train_backbone: true
   train_param_head: true
   train_activity_head: true
@@ -153,14 +187,16 @@ controller:
       train_backbone: true
       train_param_head: true
       train_activity_head: true
-      selection_metric: "val_active_param_rmse"
+      selection_metric: "val_active_param_rmse_gated"
   post_train_analysis:
     enabled: true
     out_dir: null # null -> outputs/pipeline/controller/analysis
     val_split: null # null -> reuse controller.val_split
     split_seed: 42
     batch_size: 128
-    num_renders: 5
+    num_renders: 4
+    render_selection: "best_worst" # one of: random, top_mae, best_worst
+    render_seed: 42
     sample_rate: null # null -> reuse model.clap.sample_rate
     max_duration: null # null -> reuse model.clap.max_duration
     device: null # null -> reuse global device
@@ -170,10 +206,11 @@ controller:
 
 # === Phase B-AR: AR Hybrid Controller Training ===
 ar_controller:
-  condition_dim: 128
-  hidden_dim: 256
+  condition_dim: 256
+  hidden_dim: 512
   dropout: 0.1
   max_steps: 2
+  clap_embed_dim: 512  # add CLAP(A) as additional condition input (0 = disabled)
   num_epochs: 150
   batch_size: 256
   learning_rate: 0.0001
@@ -181,10 +218,38 @@ ar_controller:
   val_split: 0.2
   seed: 42
   effect_loss_weight: 1.0
-  param_loss_weight: 1.0
+  param_loss_weight: 50.0  # scale up to balance with effect CE (~0.83 vs 0.003)
   huber_delta: 0.02
+  auto_effect_class_weights: true
+  effect_class_weight_power: 0.5
+  effect_class_weight_min: 0.5
+  effect_class_weight_max: 3.0
+  effect_ce_label_smoothing: 0.03
+  confidence_weighting_enabled: false
+  confidence_weight_power: 1.0
+  confidence_min_weight: 0.2
+  param_effect_weights:
+    lowpass: 1.0
+    bitcrush: 1.3
+    reverb: 1.8
+    highpass: 1.0
+    distortion: 1.0
+    playback_rate: 1.5
+    delay: 2.0
   lr_scheduler: "cosine"
   lr_min: 1.0e-6
+  post_train_analysis:
+    enabled: true
+    out_dir: null # null -> outputs/.../ar_controller/analysis
+    val_split: null # null -> reuse ar_controller.val_split
+    split_seed: 42
+    num_renders: 4
+    render_selection: "best_worst" # one of: random, top_mae, best_worst
+    render_seed: 42
+    sample_rate: null # null -> reuse model.clap.sample_rate
+    max_duration: null # null -> reuse model.clap.max_duration
+    device: null # null -> reuse global device
+    manifest_path: null # null -> data.augmented_audio_dir/manifest.jsonl
 
 # === Phase C: Visual Encoder ===
 visual_encoder:
@@ -204,7 +269,24 @@ visual_encoder:
 # === Phase C: Inference ===
 inference:
   top_k: 5
+  # Temperature for softmax when computing img_style_scores from CLIP delta.
+  # Calibrated via scripts/calibrate_inference.py (5250 wand-effect image pairs):
+  #   T*=0.02 gives E[top1]=0.160 which matches training CLAP delta mean top1=0.141.
+  style_temperature: 0.015
+  # Calibrated activity threshold for image-domain inference.
+  # IMG vocab pairwise sim=0.92 (vs AUD=0.78) → controller outputs weaker/broader
+  # activity probs. Threshold 0.70 gives E[N_active]=1.25 matching training distribution
+  # (single_effect_ratio=0.75 → 0.75*1+0.25*2=1.25).
+  # Set to null to use the original per-effect thresholds (calibrated on training domain).
+  activity_threshold_override: 0.67
+  # Norm-based confidence: mixes peaked style_label toward uniform when CLIP delta norm
+  # is small (unreliable z direction due to small ||delta||).
+  #   confidence = sigmoid((delta_norm - threshold) / scale)
+  #   style_label = confidence * softmax(sims/T) + (1-confidence) * uniform(1/V)
+  # Both calibrated jointly with T* via scripts/calibrate_inference.py.
+  norm_confidence_threshold: 0.529277
+  norm_confidence_scale: 0.529277
 
 # === Output ===
 output:
-  dir: "outputs/pipeline"
+  dir: "outputs/attempts/attempt11_20260224_130839/run"

@@ -184,22 +184,20 @@ def sample_random_params(
     effect_names: List[str],
     rng: Optional[np.random.Generator] = None,
     param_min_intensity: float = 0.0,
+    mid_bypass_exclusion: float = 0.0,
 ) -> Dict[str, Dict[str, float]]:
     """Sample random parameters in normalized space.
 
     Args:
-        param_min_intensity: When > 0, each parameter is sampled at least
-            this far (in normalized [0,1] space) from its bypass (neutral)
-            value, ensuring audibly stronger effects.
-            - Params whose bypass is near 0 → sampled from [min_intensity, 1]
-            - Params whose bypass is near 1 → sampled from [0, 1-min_intensity]
-            - Params whose bypass is in the middle (e.g. playback_rate) →
-              full [0, 1] range (already covers both directions)
+        param_min_intensity: Minimum normalized distance from bypass for
+            parameters whose bypass is near an edge (0 or 1).
+        mid_bypass_exclusion: Extra dead-zone radius around bypass for
+            middle-bypass parameters (e.g., playback_rate near 1.0x).
     """
     if rng is None:
         rng = np.random.default_rng()
 
-    if param_min_intensity <= 0.0:
+    if param_min_intensity <= 0.0 and mid_bypass_exclusion <= 0.0:
         total = get_total_param_count(effect_names)
         normalized = rng.uniform(0.0, 1.0, size=total).astype(np.float32)
         return denormalize_params(normalized, effect_names)
@@ -212,16 +210,33 @@ def sample_random_params(
             bypass_actual = bypass_vals.get(ps.name, ps.min_val)
             bp_norm = _bypass_normalized(ps, bypass_actual)
             if bp_norm < 0.4:
-                # Bypass near min → strong effect = high normalized value
                 lo = float(np.clip(param_min_intensity, 0.0, 1.0))
                 hi = 1.0
             elif bp_norm > 0.6:
-                # Bypass near max → strong effect = low normalized value
                 lo = 0.0
                 hi = float(np.clip(1.0 - param_min_intensity, 0.0, 1.0))
             else:
-                # Bypass in middle (e.g. playback_rate at ~0.54) → full range
-                lo, hi = 0.0, 1.0
+                exclusion = float(max(mid_bypass_exclusion, param_min_intensity))
+                if exclusion > 0.0:
+                    left_lo, left_hi = 0.0, float(np.clip(bp_norm - exclusion, 0.0, 1.0))
+                    right_lo, right_hi = float(np.clip(bp_norm + exclusion, 0.0, 1.0)), 1.0
+                    candidates = []
+                    widths = []
+                    if left_hi - left_lo > 1e-6:
+                        candidates.append((left_lo, left_hi))
+                        widths.append(left_hi - left_lo)
+                    if right_hi - right_lo > 1e-6:
+                        candidates.append((right_lo, right_hi))
+                        widths.append(right_hi - right_lo)
+                    if candidates:
+                        widths_arr = np.array(widths, dtype=np.float64)
+                        probs = widths_arr / np.maximum(widths_arr.sum(), 1e-12)
+                        pick = int(rng.choice(len(candidates), p=probs))
+                        lo, hi = candidates[pick]
+                    else:
+                        lo, hi = 0.0, 1.0
+                else:
+                    lo, hi = 0.0, 1.0
             if lo >= hi:
                 lo, hi = 0.0, 1.0
             parts.append(float(np.clip(rng.uniform(lo, hi), 0.0, 1.0)))

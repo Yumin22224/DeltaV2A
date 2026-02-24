@@ -64,6 +64,10 @@ class DeltaV2APipeline:
         use_clip_delta_fallback: bool = False,
         activity_thresholds: Optional[np.ndarray] = None,
         apply_activity_gating: bool = True,
+        style_temperature: float = 0.1,
+        activity_threshold_override: Optional[float] = None,
+        norm_confidence_threshold: Optional[float] = None,
+        norm_confidence_scale: Optional[float] = None,
     ):
         self.clip = clip_embedder
         self.visual_encoder = visual_encoder
@@ -76,9 +80,18 @@ class DeltaV2APipeline:
         self.device = device
         self.use_siamese_visual_encoder = use_siamese_visual_encoder
         self.use_clip_delta_fallback = use_clip_delta_fallback
+        self.style_temperature = float(style_temperature)
         self.apply_activity_gating = bool(apply_activity_gating)
+        self.norm_confidence_threshold = float(norm_confidence_threshold) if norm_confidence_threshold is not None else None
+        self.norm_confidence_scale = float(norm_confidence_scale) if norm_confidence_scale is not None else None
         self.renderer = PedalboardRenderer(sample_rate=sample_rate)
-        self.activity_thresholds = activity_thresholds.astype(np.float32) if activity_thresholds is not None else None
+        # Apply threshold override: replace calibrated thresholds with a uniform floor.
+        # Useful when inference-domain style signals are weaker than training-domain signals.
+        if activity_threshold_override is not None:
+            n_effects = len(effect_names)
+            self.activity_thresholds = np.full(n_effects, float(activity_threshold_override), dtype=np.float32)
+        else:
+            self.activity_thresholds = activity_thresholds.astype(np.float32) if activity_thresholds is not None else None
         self._bypass_normalized = normalize_params({}, effect_names)
         self._effect_param_slices = []
         start = 0
@@ -99,6 +112,10 @@ class DeltaV2APipeline:
         clap_embedder,
         device: str = "cpu",
         use_siamese_visual_encoder: Optional[bool] = None,
+        style_temperature: float = 0.1,
+        activity_threshold_override: Optional[float] = None,
+        norm_confidence_threshold: Optional[float] = None,
+        norm_confidence_scale: Optional[float] = None,
     ) -> 'DeltaV2APipeline':
         """Load pipeline from saved artifacts directory."""
         import json
@@ -160,6 +177,8 @@ class DeltaV2APipeline:
             total_params=total_params,
             hidden_dims=ctrl_model_cfg.get("hidden_dims"),
             dropout=float(ctrl_model_cfg.get("dropout", 0.1)),
+            fusion_mode=str(ctrl_model_cfg.get("fusion_mode", "concat")),
+            audio_gate_bias=float(ctrl_model_cfg.get("audio_gate_bias", -2.0)),
             use_activity_head=bool(ctrl_model_cfg.get("use_activity_head", False)),
             num_effects=int(ctrl_model_cfg.get("num_effects", len(effect_names))),
         )
@@ -195,6 +214,10 @@ class DeltaV2APipeline:
             use_clip_delta_fallback=use_clip_delta_fallback,
             activity_thresholds=thresholds_arr,
             apply_activity_gating=True,
+            style_temperature=float(style_temperature),
+            activity_threshold_override=activity_threshold_override,
+            norm_confidence_threshold=norm_confidence_threshold,
+            norm_confidence_scale=norm_confidence_scale,
         )
 
     def _gate_params_by_activity(
@@ -238,29 +261,40 @@ class DeltaV2APipeline:
 
         # Step 1: Visual Encoding / direct style delta
         if not self.use_siamese_visual_encoder:
-            # Direct mode: use vocab-space delta Sim(I') - Sim(I)
+            # Direct mode: compute normalized CLIP delta, then apply temperature softmax
+            # to vocab similarities — matching the training label computation exactly:
+            #   aud_style = softmax(aud_vocab @ normalize(CLAP(A') - CLAP(A)) / T)
             clip_orig = clip_orig / (clip_orig.norm(dim=-1, keepdim=True) + 1e-8)
             clip_edit = clip_edit / (clip_edit.norm(dim=-1, keepdim=True) + 1e-8)
-            z_visual = clip_edit - clip_orig
-            z_visual = z_visual / (z_visual.norm(dim=-1, keepdim=True) + 1e-8)
+            raw_delta = clip_edit - clip_orig
+            # Capture delta_norm BEFORE normalizing: when ||delta|| is small, the direction
+            # z = delta/||delta|| is numerically unreliable (small denominator amplifies noise).
+            delta_norm_scalar = float(raw_delta.norm(dim=-1).cpu())
+            z_visual = raw_delta / (raw_delta.norm(dim=-1, keepdim=True) + 1e-8)
 
             z_visual_np = z_visual[0].cpu().numpy()
             img_embeddings = self.style_vocab.img_vocab.embeddings
-            sim_orig = img_embeddings @ clip_orig[0].cpu().numpy()
-            sim_edit = img_embeddings @ clip_edit[0].cpu().numpy()
-            img_delta = (sim_edit - sim_orig).astype(np.float32)
-            top_k_indices = np.argsort(img_delta)[-self.top_k:][::-1]
+            # Cosine similarity of normalized CLIP delta to each vocab term (matches training)
+            sims = (img_embeddings @ z_visual_np).astype(np.float32)
+            top_k_indices = np.argsort(sims)[-self.top_k:][::-1]
             top_k_terms = [self.style_vocab.img_vocab.terms[i] for i in top_k_indices]
-            top_k_scores = [float(img_delta[i]) for i in top_k_indices]
+            top_k_scores = [float(sims[i]) for i in top_k_indices]
 
-            img_style_scores = np.maximum(img_delta, 0.0)
-            total = float(img_style_scores.sum())
-            if total > 0:
-                img_style_scores = img_style_scores / total
-            else:
-                img_style_scores = np.ones_like(img_style_scores, dtype=np.float32) / max(
-                    len(img_style_scores), 1
-                )
+            # Temperature softmax — matches inverse_mapping.py training label computation
+            logits = sims / self.style_temperature
+            logits -= logits.max()  # numerical stability
+            exp_logits = np.exp(logits)
+            img_style_scores = (exp_logits / exp_logits.sum()).astype(np.float32)
+
+            # Norm-based confidence mixing: suppress peaked distribution toward uniform
+            # when delta_norm is small (direction z is unreliable).
+            if self.norm_confidence_threshold is not None and self.norm_confidence_scale is not None:
+                confidence = 1.0 / (1.0 + np.exp(
+                    -(delta_norm_scalar - self.norm_confidence_threshold) / self.norm_confidence_scale
+                ))
+                V = len(img_style_scores)
+                uniform = np.ones(V, dtype=np.float32) / V
+                img_style_scores = (confidence * img_style_scores + (1.0 - confidence) * uniform).astype(np.float32)
         else:
             if self.use_clip_delta_fallback:
                 z_visual = clip_edit - clip_orig
