@@ -1,55 +1,84 @@
-import type { WandEffect } from '../types'
+import type { WandEffect, EffectSelection } from '../types'
 import { WAND_EFFECTS, WAND_EFFECT_LABELS } from '../types'
 
 interface Props {
-  selectedEffect: WandEffect
-  intensity: number
-  onEffectChange: (effect: WandEffect) => void
-  onIntensityChange: (value: number) => void
+  selections: EffectSelection[]
+  onSelectionsChange: (selections: EffectSelection[]) => void
 }
 
-export function EffectPanel({ selectedEffect, intensity, onEffectChange, onIntensityChange }: Props) {
+export function EffectPanel({ selections, onSelectionsChange }: Props) {
+  const selMap = new Map(selections.map((s) => [s.name, s.intensity]))
+
+  const toggle = (eff: WandEffect) => {
+    if (selMap.has(eff)) {
+      onSelectionsChange(selections.filter((s) => s.name !== eff))
+    } else {
+      onSelectionsChange([...selections, { name: eff, intensity: 0.6 }])
+    }
+  }
+
+  const setIntensity = (eff: WandEffect, val: number) => {
+    const clamped = Math.max(0, Math.min(1, isNaN(val) ? 0 : val))
+    onSelectionsChange(selections.map((s) => (s.name === eff ? { ...s, intensity: clamped } : s)))
+  }
+
   return (
-    <div className="bg-gray-800 rounded-xl p-5 space-y-5">
-      <div>
-        <p className="text-xs uppercase tracking-widest text-gray-500 mb-3">Image Effect</p>
-        <div className="flex flex-wrap gap-2">
-          {WAND_EFFECTS.map((eff) => (
+    <div className="space-y-6">
+      <p className="text-xs uppercase tracking-widest text-gray-400">Image Effects</p>
+
+      <div className="flex flex-wrap gap-2">
+        {WAND_EFFECTS.map((eff) => {
+          const active = selMap.has(eff)
+          return (
             <button
               key={eff}
-              onClick={() => onEffectChange(eff)}
-              className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
-                eff === selectedEffect
-                  ? 'bg-indigo-600 text-white'
-                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+              onClick={() => toggle(eff)}
+              className={`px-3 py-1.5 text-sm border transition-colors ${
+                active
+                  ? 'border-gray-900 bg-gray-900 text-white'
+                  : 'border-gray-300 text-gray-600 hover:border-gray-700 hover:text-gray-900'
               }`}
             >
               {WAND_EFFECT_LABELS[eff]}
             </button>
-          ))}
-        </div>
+          )
+        })}
       </div>
 
-      <div>
-        <div className="flex items-center justify-between mb-2">
-          <p className="text-xs uppercase tracking-widest text-gray-500">Intensity</p>
-          <span className="text-sm font-mono text-indigo-300">{intensity.toFixed(2)}</span>
+      {selections.length > 0 && (
+        <div className="space-y-4 border-t border-gray-100 pt-4">
+          {selections.map(({ name, intensity }) => (
+            <div key={name} className="flex items-center gap-4">
+              <span className="text-xs text-gray-500 w-28 flex-shrink-0">{WAND_EFFECT_LABELS[name]}</span>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.01}
+                value={intensity}
+                onChange={(e) => setIntensity(name, Number(e.target.value))}
+                className="flex-1 h-px appearance-none bg-gray-200 cursor-pointer accent-gray-900"
+              />
+              <input
+                type="number"
+                min={0}
+                max={1}
+                step={0.01}
+                value={intensity.toFixed(2)}
+                onChange={(e) => setIntensity(name, parseFloat(e.target.value))}
+                className="w-14 text-xs font-mono text-gray-700 border-b border-gray-300 bg-transparent
+                           text-right pb-0.5 focus:outline-none focus:border-gray-900
+                           [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none
+                           [&::-webkit-inner-spin-button]:appearance-none"
+              />
+            </div>
+          ))}
         </div>
-        <input
-          type="range"
-          min={0}
-          max={1}
-          step={0.01}
-          value={intensity}
-          onChange={(e) => onIntensityChange(Number(e.target.value))}
-          className="w-full h-2 rounded-full appearance-none cursor-pointer
-                     bg-gray-700 accent-indigo-500"
-        />
-        <div className="flex justify-between text-xs text-gray-600 mt-1">
-          <span>0.0</span>
-          <span>1.0</span>
-        </div>
-      </div>
+      )}
+
+      {selections.length === 0 && (
+        <p className="text-xs text-gray-400">Select one or more effects above</p>
+      )}
     </div>
   )
 }

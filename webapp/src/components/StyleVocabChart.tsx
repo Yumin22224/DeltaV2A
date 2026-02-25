@@ -5,7 +5,6 @@ interface Props {
   topK: string[]
 }
 
-// Strip "a " prefix and " image" suffix for concise display
 function formatTerm(term: string): string {
   return term.replace(/^a\s+/, '').replace(/\s+image$/, '')
 }
@@ -16,8 +15,8 @@ export function StyleVocabChart({ scores, topK }: Props) {
   const topKSet = new Set(topK)
 
   return (
-    <div className="bg-gray-800 rounded-xl p-5">
-      <h3 className="text-sm font-semibold text-gray-300 mb-4">Image Style Distribution</h3>
+    <div>
+      <p className="text-xs uppercase tracking-widest text-gray-400 mb-5">Image Style Distribution</p>
       <div className="space-y-2">
         {sorted.map(({ term, score }, i) => {
           const isTop = topKSet.has(term)
@@ -26,21 +25,21 @@ export function StyleVocabChart({ scores, topK }: Props) {
             <div key={term} className="flex items-center gap-3">
               <span
                 className={`text-xs w-28 flex-shrink-0 truncate ${
-                  isTop ? 'text-indigo-300 font-medium' : 'text-gray-500'
+                  isTop ? 'text-gray-900 font-medium' : 'text-gray-400'
                 }`}
                 title={term}
               >
                 {formatTerm(term)}
               </span>
-              <div className="flex-1 bg-gray-700 rounded-full h-2 overflow-hidden">
+              <div className="flex-1 bg-gray-100 h-1.5">
                 <div
-                  className={`h-full rounded-full transition-all duration-300 ${
-                    i < 3 ? 'bg-indigo-500' : i < 6 ? 'bg-indigo-700' : 'bg-gray-600'
+                  className={`h-full transition-all duration-300 ${
+                    i < 3 ? 'bg-gray-900' : i < 6 ? 'bg-gray-500' : 'bg-gray-300'
                   }`}
                   style={{ width: `${pct}%` }}
                 />
               </div>
-              <span className={`text-xs font-mono w-12 text-right ${isTop ? 'text-indigo-300' : 'text-gray-600'}`}>
+              <span className={`text-xs font-mono w-12 text-right ${isTop ? 'text-gray-900' : 'text-gray-400'}`}>
                 {score.toFixed(4)}
               </span>
             </div>

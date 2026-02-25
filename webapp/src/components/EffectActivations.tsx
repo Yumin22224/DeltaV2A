@@ -37,60 +37,40 @@ export function EffectActivations({ activations }: Props) {
   const activeCount = activations.filter((a) => a.active).length
 
   return (
-    <div className="bg-gray-800 rounded-xl p-5">
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-sm font-semibold text-gray-300">Audio Effect Activations</h3>
-        <span className="text-xs text-gray-500">
-          {activeCount}/{activations.length} active
-        </span>
+    <div>
+      <div className="flex items-baseline justify-between mb-5">
+        <p className="text-xs uppercase tracking-widest text-gray-400">Audio Effect Activations</p>
+        <span className="text-xs text-gray-400">{activeCount}/{activations.length} active</span>
       </div>
-      <div className="space-y-2">
+
+      <div className="space-y-3">
         {activations.map(({ name, active, probability, params }) => (
           <div
             key={name}
-            className={`rounded-lg px-4 py-3 border transition-colors ${
-              active
-                ? 'border-indigo-600/60 bg-indigo-950/40'
-                : 'border-gray-700 bg-gray-750'
-            }`}
+            className={`pl-3 border-l-2 py-0.5 ${active ? 'border-gray-900' : 'border-gray-200'}`}
           >
             <div className="flex items-center gap-3">
-              {/* Active indicator */}
-              <div
-                className={`w-2 h-2 rounded-full flex-shrink-0 ${
-                  active ? 'bg-indigo-400' : 'bg-gray-600'
-                }`}
-              />
-
-              {/* Effect name */}
-              <span
-                className={`text-sm font-medium flex-1 ${
-                  active ? 'text-indigo-200' : 'text-gray-500'
-                }`}
-              >
+              <span className={`text-sm flex-1 ${active ? 'text-gray-900 font-medium' : 'text-gray-400'}`}>
                 {formatEffectName(name)}
               </span>
-
-              {/* Probability bar */}
               <div className="flex items-center gap-2">
-                <div className="w-16 bg-gray-700 rounded-full h-1.5">
+                <div className="w-16 bg-gray-100 h-1">
                   <div
-                    className={`h-full rounded-full ${active ? 'bg-indigo-500' : 'bg-gray-600'}`}
+                    className={`h-full ${active ? 'bg-gray-900' : 'bg-gray-300'}`}
                     style={{ width: `${probability * 100}%` }}
                   />
                 </div>
-                <span className={`text-xs font-mono w-8 text-right ${active ? 'text-indigo-300' : 'text-gray-600'}`}>
+                <span className={`text-xs font-mono w-8 text-right ${active ? 'text-gray-700' : 'text-gray-400'}`}>
                   {Math.round(probability * 100)}%
                 </span>
               </div>
             </div>
 
-            {/* Parameters (only for active effects) */}
             {active && Object.keys(params).length > 0 && (
-              <div className="mt-2 pl-5 flex flex-wrap gap-2">
+              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
                 {Object.entries(params).map(([k, v]) => (
-                  <span key={k} className="text-xs bg-gray-700/60 text-gray-300 rounded px-2 py-0.5">
-                    {formatParamName(k)}: {formatParamValue(k, v)}
+                  <span key={k} className="text-xs text-gray-500">
+                    {formatParamName(k)}&thinsp;{formatParamValue(k, v)}
                   </span>
                 ))}
               </div>

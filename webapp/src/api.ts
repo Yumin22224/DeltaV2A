@@ -1,16 +1,14 @@
-import type { InferResult } from './types'
+import type { InferResult, EffectSelection } from './types'
 
 const API_URL = (import.meta.env.VITE_API_URL as string | undefined) ?? ''
 
 export async function fetchPreview(
   image: File,
-  effect: string,
-  intensity: number,
+  effects: EffectSelection[],
 ): Promise<string> {
   const form = new FormData()
   form.append('image', image)
-  form.append('effect', effect)
-  form.append('intensity', String(intensity))
+  form.append('effects', JSON.stringify(effects.map(e => ({ name: e.name, intensity: e.intensity }))))
 
   const res = await fetch(`${API_URL}/api/preview-effect`, { method: 'POST', body: form })
   if (!res.ok) {
@@ -23,14 +21,12 @@ export async function fetchPreview(
 
 export async function runInfer(
   original: File,
-  effect: string,
-  intensity: number,
+  effects: EffectSelection[],
   audio: File,
 ): Promise<InferResult> {
   const form = new FormData()
   form.append('original', original)
-  form.append('effect', effect)
-  form.append('intensity', String(intensity))
+  form.append('effects', JSON.stringify(effects.map(e => ({ name: e.name, intensity: e.intensity }))))
   form.append('audio', audio)
 
   const res = await fetch(`${API_URL}/api/infer`, { method: 'POST', body: form })

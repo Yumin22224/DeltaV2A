@@ -7,18 +7,18 @@ interface Props {
 export function EffectPreview({ originalFile, previewB64, isLoading }: Props) {
   return (
     <div
-      className="rounded-xl border-2 border-gray-700 bg-gray-800 overflow-hidden relative"
+      className="border border-gray-200 relative overflow-hidden"
       style={{ minHeight: '220px' }}
     >
       {!originalFile && (
         <div className="flex items-center justify-center h-full py-12">
-          <p className="text-sm text-gray-600">Upload an image to see preview</p>
+          <p className="text-sm text-gray-400">Upload an image to see preview</p>
         </div>
       )}
 
       {originalFile && !previewB64 && !isLoading && (
         <div className="flex items-center justify-center h-full py-12">
-          <p className="text-sm text-gray-600">Select an effect to preview</p>
+          <p className="text-sm text-gray-400">Select an effect to preview</p>
         </div>
       )}
 
@@ -32,8 +32,8 @@ export function EffectPreview({ originalFile, previewB64, isLoading }: Props) {
       )}
 
       {isLoading && (
-        <div className="absolute inset-0 flex items-center justify-center bg-gray-900/60">
-          <div className="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+        <div className="absolute inset-0 flex items-center justify-center bg-white/60">
+          <div className="w-6 h-6 border border-gray-400 border-t-transparent rounded-full animate-spin" />
         </div>
       )}
     </div>

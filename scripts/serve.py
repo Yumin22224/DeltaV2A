@@ -16,6 +16,7 @@ Usage:
 import asyncio
 import base64
 import io
+import json
 import os
 import sys
 import threading
@@ -175,10 +176,9 @@ def health():
 @app.post("/api/preview-effect")
 async def preview_effect(
     image: UploadFile = File(...),
-    effect: str = Form(...),
-    intensity: float = Form(...),
+    effects: str = Form(...),  # JSON: [{"name": "sepia_tone", "intensity": 0.7}, ...]
 ):
-    """Apply a wand image effect and return the result as base64 PNG.
+    """Apply one or more wand image effects and return the result as base64 PNG.
 
     This endpoint does NOT require the pipeline to be loaded — wand only.
     """
@@ -186,10 +186,12 @@ async def preview_effect(
     from src.effects.wand_image_effects import apply_effect
 
     try:
+        effects_list = json.loads(effects)
         img_bytes = await image.read()
         pil_img = PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
-        edited_pil = apply_effect(pil_img, effect, float(intensity))
-        return {"image_base64": _pil_to_b64(edited_pil)}
+        for e in effects_list:
+            pil_img = apply_effect(pil_img, e["name"], float(e["intensity"]))
+        return {"image_base64": _pil_to_b64(pil_img)}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -197,8 +199,7 @@ async def preview_effect(
 @app.post("/api/infer")
 async def infer_endpoint(
     original: UploadFile = File(...),
-    effect: str = Form(...),
-    intensity: float = Form(...),
+    effects: str = Form(...),  # JSON: [{"name": "sepia_tone", "intensity": 0.7}, ...]
     audio: UploadFile = File(...),
 ):
     """Full inference pipeline.
@@ -222,6 +223,7 @@ async def infer_endpoint(
 
     orig_bytes = await original.read()
     audio_bytes = await audio.read()
+    effects_str = effects
 
     loop = asyncio.get_event_loop()
 
@@ -229,7 +231,10 @@ async def infer_endpoint(
         with _inference_lock:
             # --- Image processing ---
             orig_pil = PILImage.open(io.BytesIO(orig_bytes)).convert("RGB")
-            edited_pil = apply_effect(orig_pil, effect, float(intensity))
+            effects_list = json.loads(effects_str)
+            edited_pil = orig_pil.copy()
+            for e in effects_list:
+                edited_pil = apply_effect(edited_pil, e["name"], float(e["intensity"]))
 
             orig_t = TF.to_tensor(orig_pil).unsqueeze(0)
             edit_t = TF.to_tensor(edited_pil).unsqueeze(0)

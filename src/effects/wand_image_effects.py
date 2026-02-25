@@ -17,14 +17,13 @@ EffectType = Literal[
     "solarize",
 ]
 
-_BLUR_SIGMA_MIN, _BLUR_SIGMA_MAX = 0.5, 4.0
-_MOTION_RADIUS_MIN, _MOTION_RADIUS_MAX = 2.0, 14.0
-_MOTION_SIGMA_MIN, _MOTION_SIGMA_MAX = 0.6, 4.0
-_MOTION_ANGLE_MIN, _MOTION_ANGLE_MAX = 0.0, 90.0
-_SHARPEN_SIGMA_MIN, _SHARPEN_SIGMA_MAX = 0.2, 2.2
-_SPREAD_RADIUS_MIN, _SPREAD_RADIUS_MAX = 0.2, 3.0
-_SEPIA_THRESHOLD_MIN, _SEPIA_THRESHOLD_MAX = 10.0, 85.0
-_SOLARIZE_THRESHOLD_MIN, _SOLARIZE_THRESHOLD_MAX = 20.0, 95.0
+_BLUR_SIGMA_MIN, _BLUR_SIGMA_MAX = 0.1, 20.0
+_MOTION_RADIUS_MIN, _MOTION_RADIUS_MAX = 1.0, 40.0
+_MOTION_SIGMA_MIN, _MOTION_SIGMA_MAX = 0.5, 15.0
+_MOTION_ANGLE_MIN, _MOTION_ANGLE_MAX = 0.0, 360.0
+_SHARPEN_SIGMA_MIN, _SHARPEN_SIGMA_MAX = 0.1, 10.0
+_SPREAD_RADIUS_MIN, _SPREAD_RADIUS_MAX = 0.5, 20.0
+_SOLARIZE_THRESHOLD_MIN, _SOLARIZE_THRESHOLD_MAX = 2.0, 99.0
 
 
 def _clamp01(x: float) -> float:
@@ -155,9 +154,15 @@ def _apply_threshold_op(wimg, method_name: str, threshold: str):
 
 def apply_sepia_tone(image: Image.Image, intensity: float) -> Image.Image:
     t = _clamp01(intensity)
-    # wand.sepia_tone expects threshold in [0.0, 1.0] (multiplied by QuantumRange internally).
-    threshold = _lerp(_SEPIA_THRESHOLD_MIN, _SEPIA_THRESHOLD_MAX, t) / 100.0
-    return _apply_wand(image, lambda wimg: wimg.sepia_tone(threshold=threshold))
+    if t < 1e-6:
+        return image.copy()
+    # wand.sepia_tone expects raw QuantumRange units (same as solarize, not a [0,1] fraction).
+    # Apply full sepia at 80% of QuantumRange, then blend by intensity:
+    # intensity=0 -> original, intensity=1 -> full sepia.
+    def _op(wimg):
+        wimg.sepia_tone(threshold=0.80 * wimg.quantum_range)
+    sepia = _apply_wand(image, _op)
+    return Image.blend(image, sepia, alpha=t)
 
 
 def apply_solarize(image: Image.Image, intensity: float) -> Image.Image:

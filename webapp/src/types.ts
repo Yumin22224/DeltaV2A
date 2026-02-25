@@ -20,6 +20,11 @@ export interface InferResult {
   effect_activations: EffectActivation[]
 }
 
+export interface EffectSelection {
+  name: WandEffect
+  intensity: number
+}
+
 export type WandEffect =
   | 'adaptive_blur'
   | 'motion_blur'

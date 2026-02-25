@@ -15,26 +15,57 @@ from pathlib import Path
 from dataclasses import dataclass
 
 
-# Common cross-modal style axes.
+# Common cross-modal style axes (v3 — attempt13).
 # We keep identical concept order for image/audio vocabularies.
+#
+# Design criteria (v3):
+#   ΔE-direction: Each word must describe a DIRECTION OF CHANGE in perceptual
+#   space, not an absolute semantic region. The style label is computed from
+#   normalize(CLIP(I') - CLIP(I)), so vocab embeddings must align with the
+#   TRANSFORMATION VECTOR, not with where I' ends up.
+#
+#   Cross-modal neutrality: Every term must apply equally to vision and hearing
+#   via a shared physical/structural metaphor — not derived from the perceptual
+#   apparatus of either modality (e.g. avoid light-based terms for image,
+#   avoid pitch-based terms for audio).
+#
+#   Anti-anchor: No single term should act as a generic "transformation
+#   happened" anchor (cf. "vintage" in v1, "warped" tendency in testing).
+#   Axes are grouped by perceptual dimension to spread coverage across
+#   texture, space, and energy.
+#
+# Replaced from v2 (attempt12):
+#   warm/cold          → granular/polished  (synesthetic bias → surface texture)
+#   tense/relaxed      → piercing/muffled   (arousal→frequency penetration)
+#   rough/smooth       → clipped/pristine   (signal-integrity direction, no modality bias)
+#   heavy/light        → fluid/rigid        (mass-term bias → structural flexibility)
+#   dense/sparse       → dense/hollow       (sparse→hollow: direction not density count)
+#   distant/intimate   → expansive/confined (social metaphor → spatial scale)
+#   aggressive/gentle  → fragmented/cohesive (force→structural unity, force=audio bias)
+#   static/dynamic     → layered/flat       (motion=visual bias → depth/dimensionality)
+#   clean/dirty        → crisp/muddy        (same axis, more perceptually balanced phrasing)
+#   meditative/urgent  → agitated/calm      (cognitive→kinetic energy, more neutral)
+#   archaic/contemporary → oscillating/steady (temporal→periodic variation, tested vs warped:
+#                           oscillating avoids generic-transformation anchor, 0.8257 vs 0.8452)
+#   organic/synthetic  → deep/thin          (material origin → tonal weight/thickness)
 STYLE_AXES_PHASES: List[Tuple[str, List[Tuple[str, str]]]] = [
-    ("phase_1", [
-        ("warm", "cold"),
-        ("bright", "dark"),
-        ("rough", "smooth"),
-        ("heavy", "light"),
+    ("phase_1_texture", [
+        ("granular", "polished"),   # surface finish: coarse/particulate vs smooth/refined
+        ("piercing", "muffled"),    # frequency penetration: sharp/cutting vs dulled/filtered
+        ("clipped", "pristine"),    # signal integrity: overdriven/distorted vs clean/intact
+        ("fluid", "rigid"),         # structural flexibility: flowing/adaptive vs stiff/fixed
     ]),
-    ("phase_2", [
-        ("thick", "thin"),
-        ("distant", "intimate"),
-        ("soft", "hard"),
-        ("static", "dynamic"),
+    ("phase_2_space", [
+        ("expansive", "confined"),  # spatial scale: open/wide-spreading vs narrow/enclosed
+        ("layered", "flat"),        # depth dimensionality: stacked planes vs single 2D surface
+        ("dense", "hollow"),        # mass fill: packed/full vs sparse/empty-centered
+        ("fragmented", "cohesive"), # structural unity: scattered/broken vs unified/whole
     ]),
-    ("phase_3_abstract", [
-        ("clean", "dirty"),
-        ("dreamy", "realistic"),
-        ("vintage", "modern"),
-        ("natural", "surreal"),
+    ("phase_3_energy", [
+        ("agitated", "calm"),           # kinetic energy: turbulent/restless vs still/settled
+        ("oscillating", "steady"),      # periodic variation: rhythmic fluctuation vs constant/stable
+        ("crisp", "muddy"),             # edge definition: sharp/clear-bounded vs blurred/merged
+        ("deep", "thin"),               # tonal weight: thick/low-weighted vs attenuated/high-pitched
     ]),
 ]
 

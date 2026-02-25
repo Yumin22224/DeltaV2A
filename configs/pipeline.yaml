@@ -45,7 +45,15 @@ vocab:
     - "a {word} picture"
     - "a photo that feels {word}"
     - "artwork with a {word} atmosphere"
-  aud_prompt_templates: null
+  aud_prompt_templates:
+    - "a {word} sound"
+    - "a {word} music track"
+    - "audio with a {word} mood"
+    - "a {word} sonic texture"
+    - "a {word} musical atmosphere"
+    - "a {word} sounding track"
+    - "music that feels {word}"
+    - "a {word} audio style"
 
 # === Phase A-2: Inverse Mapping Database (Music / Controller) ===
 inverse_mapping:
@@ -278,15 +286,15 @@ inference:
   # activity probs. Threshold 0.70 gives E[N_active]=1.25 matching training distribution
   # (single_effect_ratio=0.75 → 0.75*1+0.25*2=1.25).
   # Set to null to use the original per-effect thresholds (calibrated on training domain).
-  activity_threshold_override: 0.67
+  activity_threshold_override: 0.66
   # Norm-based confidence: mixes peaked style_label toward uniform when CLIP delta norm
   # is small (unreliable z direction due to small ||delta||).
   #   confidence = sigmoid((delta_norm - threshold) / scale)
   #   style_label = confidence * softmax(sims/T) + (1-confidence) * uniform(1/V)
   # Both calibrated jointly with T* via scripts/calibrate_inference.py.
-  norm_confidence_threshold: 0.529277
-  norm_confidence_scale: 0.529277
+  norm_confidence_threshold: 0.342938
+  norm_confidence_scale: 0.205763
 
 # === Output ===
 output:
-  dir: "outputs/attempts/attempt11_20260224_130839/run"
+  dir: "outputs/attempts/attempt12_20260225_085718/run"
