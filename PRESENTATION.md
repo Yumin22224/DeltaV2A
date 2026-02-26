@@ -146,9 +146,9 @@ CLIP image delta와 CLAP audio delta가 동일한 vocab 분포를 형성한다�
 |------|------|------|
 | Entropy (mean) | 4.34 bits (max = log₂24 = 4.59) | label이 24축 전반에 분포 |
 | Effective dims | 20.5 / 24 | 실질적으로 활성화된 축 수 |
-| Top-1 mass | 0.114 | 가장 강한 단일 축의 집중도 |
+| Top-1 mass | 0.141 | 가장 강한 단일 축의 집중도 |
 
-→ Top-1 mass 11.4% — label이 지나치게 flat하다. Effect 변화의 방향성이 소수 축에 집중되지 않고 전반에 퍼진다.
+→ Top-1 mass 14.1% — label이 flat하다. Effect 변화의 방향성이 소수 축에 집중되지 않고 전반에 퍼진다.
 
 #### Effect별 Style F1 (linear probe: style label → effect 분류)
 
@@ -166,18 +166,25 @@ CLIP image delta와 CLAP audio delta가 동일한 vocab 분포를 형성한다�
 → Effect에 따라 style label의 변별력이 크게 다르다.
 delay, bitcrush는 현재 vocab으로 변별이 어렵다. 이는 CLIP/CLAP의 학습 objective가 이런 low-level effect 변화를 text와 align하도록 설계된 게 아니기 때문에, 임베딩 공간 자체의 표현력 한계일 가능성이 높다.
 
-#### Cross-modal alignment (identity mapping assumption 검증)
-
-- Consistency separation = **0.038**
-- 같은 effect를 적용했을 때 image측 style label과 audio측 style label의 분포 유사도를 측정.
-- 0.038은 낮은 수치 — identity mapping assumption을 강하게 뒷받침하는 실험적 근거는 없다.
+> CLAP-side style label의 일관성 측정 (consistency separation = 0.038) → **Appendix G** 참조.
 
 #### Calibration
 
 Controller 학습 시 본 CLAP-side label 분포와, 추론 시 CLIP-side label 분포 간의 불일치를 완화.
 
-- Temperature $T^* = 0.015$ (inference)
-- Norm-based confidence mixing:
+**캘리브레이션 과정:**
+
+**Stage 1 — Temperature & Norm Confidence 탐색:**
+실제 wand-effect image 쌍 5,250개에 CLIP을 적용해 $\delta z$를 계산한 뒤, $(T, \tau_c, s_c)$ 조합을 grid search. CLIP-side top-1 mass의 기댓값이 학습 CLAP-side 평균 top-1 mass와 일치하도록 최적화:
+
+$$\min_{T,\,\tau_c,\,s_c} \left| E_{\text{CLIP-side}}[\text{top-1 mass}] - E_{\text{CLAP-side}}[\text{top-1 mass}] \right|$$
+
+→ $T^* = 0.015$, $\tau_c = 0.343$, $s_c = 0.206$
+
+**Stage 2 — Activity Threshold:**
+활성화 effect 수를 특정 목표에 맞추기 위해 단일 threshold override(0.66)를 탐색했으나, 최종적으로는 학습 시 effect별로 튜닝된 per-effect threshold를 그대로 사용하기로 결정 (`activity_threshold_override: null`). Effect 수를 인위적으로 제한하지 않고 controller 예측을 그대로 따른다.
+
+**최종 보정식:**
 
 $$s_{\text{final}} = c \cdot \text{softmax}\!\left(\frac{\delta z \cdot V}{T^*}\right) + (1-c) \cdot \frac{1}{24}\mathbf{1}$$
 
@@ -193,6 +200,10 @@ $$c = \sigma\!\left(\frac{\|\delta z\| - \tau_c}{\,s_c\,}\right), \quad \tau_c =
 
 ### [Experiment 3] Controller는 무엇을 봐야 하는가? — Linear Probe
 
+**방법론:**
+- **Mean baseline:** 학습 데이터 전체의 파라미터 평균값을 입력과 무관하게 항상 예측. 어떤 표현도 사용하지 않는 trivial 기준선.
+- **Linear probe:** 각 입력 표현 위에 단일 선형 레이어만 추가해 파라미터를 예측. 해당 표현이 파라미터 정보를 얼마나 선형적으로 담고 있는지를 가중치 없이 진단하는 경량 실험.
+
 | 입력 조합 | Active Param RMSE |
 |----------|-------------------|
 | Mean baseline (항상 평균 예측) | 0.553 |
@@ -200,8 +211,7 @@ $$c = \sigma\!\left(\frac{\|\delta z\| - \tau_c}{\,s_c\,}\right), \quad \tau_c =
 | Style label only | **0.420** |
 | CLAP + Style (gated) | **0.398** |
 
-→ CLAP raw embedding 단독은 mean baseline과 동일한 성능 — 독립적인 예측력이 없다.
-Style label이 실질적 신호를 담고 있으며, 이것이 Controller 설계의 실험적 근거가 된다.
+→ 핵심 발견: CLAP raw embedding은 mean baseline과 동일 — 독립적으로는 무의미한 신호. Style label이 실질적 정보를 담고 있음. → Controller 설계 근거: style label primary, CLAP은 gated residual로 (실질적 기여 최소화)
 
 ---
 
@@ -253,18 +263,16 @@ Identity mapping assumption 하에, 두 분포는 동일하다고 가정되므�
 ### Controller 구조 (총 191K params)
 
 ```
-Input: style_label (24-dim)
-  └─ MLP backbone:
-       Linear(24 → 256) → ReLU → Dropout(0.3)
-       Linear(256 → 256) → ReLU → Dropout(0.3)
-       Linear(256 → 128) → ReLU
-       + gated residual fusion:
-           CLAP(A) (512-dim) → Linear → gate_weight (sigmoid, bias=-2.0) → 잔차 합산
+Input: style_label (24-dim)              CLAP(A) (512-dim) [입력 오디오 A의 timbral embedding]
+  └─ MLP backbone:                             │
+       Linear(24 → 256) → ReLU → Dropout(0.3) │ gated residual
+       Linear(256 → 256) → ReLU → Dropout(0.3)│ (gate = sigmoid, bias=-2.0)
+       Linear(256 → 128) → ReLU ←─────────────┘ (기본 거의 닫힘 → CLAP 기여 억제)
   ├─ Activity head: Linear(128 → 7) + Sigmoid   → 7개 effect 이진 활성화 예측
   └─ Param head:   Linear(128 → 12) + Sigmoid  → 12개 파라미터 [0,1] 예측
 ```
 
-gated residual의 `gate_bias=-2.0`은 gate를 기본적으로 거의 닫힌 상태로 초기화 → CLAP embedding의 기여를 학습 초기부터 억제하여, probe 결과와 일치하는 방향으로 inductive bias를 부여.
+**CLAP(A)의 역할:** CLAP(A)는 입력 오디오 A의 스펙트럼·음색 특성을 인코딩한 벡터다. Style label이 "어떤 방향으로 변화할지"를 결정하는 1차 신호라면, CLAP(A)는 현재 오디오의 특성에 따라 그 방향을 미세 조정하는 2차 신호다. Probe 결과(CLAP alone=0.553, CLAP+Style=0.398 vs Style alone=0.420)에서 CLAP이 단독으로는 정보가 없지만, style label과 결합 시 소폭(+5.2%) 기여함을 확인. `gate_bias=-2.0`으로 기본적으로 닫혀 있어 학습 초기 안정성을 보장하며, probe 결과와 일치하는 inductive bias를 부여한다.
 
 ---
 
@@ -274,9 +282,9 @@ gated residual의 `gate_bias=-2.0`은 gate를 기본적으로 거의 닫힌 상�
 
 $$L_{\text{ASL}}(y_i, p_i) = \begin{cases} (1-p_i)^{\gamma_+} \log(p_i) & \text{if } y_i = 1 \\ (p_i^-)^{\gamma_-} \log(1 - p_i^-) & \text{if } y_i = 0 \end{cases}$$
 
-$$p_i^- = \max(p_i - m,\; 0), \quad \gamma_+ = 0,\; \gamma_- = 4,\; m = 0.05$$
+$$p_i^- = \max(p_i - m,\; 0), \quad \gamma_+ = 0,\; \gamma_- = 5,\; m = 0.05$$
 
-- **$\gamma_- = 4$:** false negative (놓친 effect)에 강한 페널티 — effect가 실제로 없는데 있다고 예측하는 것보다, 있는데 없다고 예측하는 것을 더 강하게 억제
+- **$\gamma_- = 5$:** false negative (놓친 effect)에 강한 페널티 — effect가 실제로 없는데 있다고 예측하는 것보다, 있는데 없다고 예측하는 것을 더 강하게 억제
 - **$m = 0.05$ (margin clip):** 낮은 확률의 negative sample에서 gradient를 0으로 만들어 쉬운 negative에 과도하게 집중하지 않도록
 
 #### Param Loss — Huber Loss
@@ -284,7 +292,17 @@ $$p_i^- = \max(p_i - m,\; 0), \quad \gamma_+ = 0,\; \gamma_- = 4,\; m = 0.05$$
 $$L_{\text{Huber}}(\hat{p}, p; \delta) = \begin{cases} \dfrac{(\hat{p} - p)^2}{2\delta} & \text{if } |\hat{p} - p| \leq \delta \\[6pt] |\hat{p} - p| - \dfrac{\delta}{2} & \text{otherwise} \end{cases}, \quad \delta = 0.02$$
 
 - Outlier에 robust하면서도 작은 오차에서 quadratic gradient를 유지
-- Effect별 가중치 $w_e$ 적용: delay×2.0, bitcrush×1.5, playback_rate×1.5, 나머지×1.0
+- Effect별 가중치 $w_e$ 적용:
+
+| Effect | $w_e$ |
+|--------|-------|
+| delay | 3.0 |
+| bitcrush | 2.5 |
+| lowpass | 2.0 |
+| highpass | 2.0 |
+| reverb | 1.5 |
+| playback_rate | 1.5 |
+| distortion | 1.0 |
 
 #### Activity Mismatch Penalty
 
@@ -298,7 +316,7 @@ $$\gamma_{\text{mm}} = 2.0,\; w_{\text{mm}} = 2.0$$
 
 $$L_{\text{total}} = w_{\text{act}} \cdot L_{\text{activity}} + w_{\text{param}} \cdot L_{\text{param}} + L_{\text{mismatch}}$$
 
-$$w_{\text{act}} = 0.5,\quad w_{\text{param}} = 1.0$$
+$$w_{\text{act}} = 0.6,\quad w_{\text{param}} = 1.0$$
 
 ---
 
@@ -393,8 +411,8 @@ reverb의 경우 style F1이 0.659로 높음에도 파라미터 RMSE가 높은 �
 ### Limitations
 
 **1. Identity Mapping Assumption의 취약성**
-Cross-modal consistency separation = 0.038.
-측정 결과가 약한 alignment를 보인다. image delta와 audio delta가 동일한 style label 분포를 형성한다는 가정에 실험적 뒷받침이 충분하지 않다.
+Style label consistency separation (CLAP-side intra-modal) = 0.038.
+같은 effect를 적용한 audio sample 쌍이 무작위 쌍보다 유사한 style label을 형성한다는 근거가 약하다. image↔audio cross-modal alignment는 별도로 측정되지 않으며, identity mapping assumption의 직접적인 실험적 뒷받침은 없다.
 
 **2. Style Vocab의 낮은 변별력 (effect별 편차)**
 bitcrush F1=0.163, delay F1=0.275.
@@ -485,11 +503,11 @@ Effect 파라미터 간 상호 의존성 (e.g. reverb.wet_level ↔ reverb.room_
 | Batch size | 256 |
 | Epochs | 600 |
 | Weight decay | 1e-3 |
-| Activity loss | ASL (γ_pos=0, γ_neg=4, clip=0.05) |
+| Activity loss | ASL (γ_pos=0, γ_neg=5, clip=0.05) |
 | Param loss | Huber (δ=0.02) |
-| w_act / w_param | 0.5 / 1.0 |
+| w_act / w_param | 0.6 / 1.0 |
 | Mismatch weight / gamma | 2.0 / 2.0 |
-| Effect loss weights | delay×2.0, bitcrush×1.5, playback_rate×1.5, 나머지×1.0 |
+| Effect loss weights | delay×3.0, bitcrush×2.5, lowpass×2.0, highpass×2.0, reverb×1.5, playback_rate×1.5, distortion×1.0 |
 | Selection metric | val_active_param_rmse_gated |
 
 ### Inference
@@ -498,8 +516,8 @@ Effect 파라미터 간 상호 의존성 (e.g. reverb.wet_level ↔ reverb.room_
 | Style temperature T* | 0.015 |
 | Norm confidence threshold τ_c | 0.343 |
 | Norm confidence scale s_c | 0.206 |
-| Activity threshold override | 0.66 |
-| Top-k | 5 |
+| Activity threshold override | null (학습 시 per-effect threshold 사용) |
+| Top-k | 5 (UI 표시용 — 상위 5개 vocab term을 웹 데모에 노출, 추론 로직에 무관) |
 
 ---
 
@@ -513,15 +531,14 @@ Effect 파라미터 간 상호 의존성 (e.g. reverb.wet_level ↔ reverb.room_
 
 1. **Temperature scaling:** $T^* = 0.015$
    `scripts/calibrate_inference.py`로 5,250개의 wand-effect image 쌍에 대해 최적화.
-   목표: CLIP-side top-1 mass의 기댓값 $E[\text{top1}] = 0.160$을 학습 CLAP-side 평균 $0.141$에 맞춤.
+   목표: `--target-top1 = 0.1412` (학습 CLAP-side 평균 top-1 mass, `calibrate_inference.py` 기본값으로 고정).
 
 2. **Norm-based confidence mixing:**
    $\|\delta z\|$이 작으면 (CLIP이 변화를 약하게 감지) style label을 uniform에 가깝게 보정.
    $\tau_c, s_c$도 T*와 jointly calibrate.
 
-3. **Activity threshold override = 0.66:**
-   IMG vocab의 pairwise similarity가 높아 controller의 activity probability가 전반적으로 낮게 나옴.
-   기댓값 $E[N_{\text{active}}] = 1.25$를 학습 분포 (single_effect_ratio 기준)에 맞추도록 임계값 조정.
+3. **Activity threshold: per-effect threshold 사용 (`activity_threshold_override: null`)**
+   단일 override threshold(0.66)를 탐색했으나, effect 수를 인위적으로 제한하지 않기 위해 학습 시 effect별로 튜닝된 threshold를 그대로 사용.
 
 ---
 
@@ -557,14 +574,29 @@ Step t: (이전 step에서 예측한 effect_id, params) → update condition
 |--------|-----------|-----------|
 | lowpass | cutoff_hz | 1 |
 | bitcrush | bit_depth | 1 |
-| reverb | room_size, wet_level, damping | 3 |
+| reverb | room_size, damping, wet_level, dry_level | 4 |
 | highpass | cutoff_hz | 1 |
 | distortion | drive_db | 1 |
 | delay | delay_seconds, feedback, mix | 3 |
 | playback_rate | rate | 1 |
-| **합계** | | **11** |
+| **합계** | | **12** |
 
 > Note: 실제 코드에서 playback_rate는 Pedalboard 외부에서 별도 처리하며, 항상 chain의 마지막에 적용.
+
+---
+
+## G. Style Label 내부 일관성 (Consistency Separation)
+
+**측정 과정:** CLAP-side training DB 내에서, 같은 effect 조합을 적용한 sample 쌍을 bootstrap으로 샘플링하고 각 쌍의 style label 간 cosine similarity를 계산. 이를 무작위 쌍의 cosine similarity 분포와 비교.
+
+$$\text{separation} = \overline{\cos(s_i, s_j)}_{\text{same-effect}} - \overline{\cos(s_i, s_j)}_{\text{random}}$$
+
+- Consistency separation = **0.038**
+- 0.038은 낮은 수치 — style vocab이 같은 effect를 일관된 label 방향으로 매핑하지 못하고 있음을 시사. Effect별 style F1과 같은 맥락의 지표.
+
+> 이 측정은 전적으로 CLAP-side (audio delta) 내에서만 이루어진다. CLIP-side (image delta)와 CLAP-side 간의 cross-modal alignment — identity mapping assumption의 직접적 검증 — 은 본 프레임워크에서 별도로 측정되지 않는다.
+
+**더 직접적인 진단 방향 (미수행):** 동일한 linear probe를 CLIP-side에서 수행 — wand-effect image 쌍에서 style label을 계산한 뒤 image effect 분류. 이 경우 실제 추론 경로의 입력 측 변별력을 직접 확인할 수 있다.
 
 ---
 

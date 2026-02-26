@@ -286,7 +286,7 @@ inference:
   # activity probs. Threshold 0.70 gives E[N_active]=1.25 matching training distribution
   # (single_effect_ratio=0.75 → 0.75*1+0.25*2=1.25).
   # Set to null to use the original per-effect thresholds (calibrated on training domain).
-  activity_threshold_override: 0.66
+  activity_threshold_override: null
   # Norm-based confidence: mixes peaked style_label toward uniform when CLIP delta norm
   # is small (unreliable z direction due to small ||delta||).
   #   confidence = sigmoid((delta_norm - threshold) / scale)
