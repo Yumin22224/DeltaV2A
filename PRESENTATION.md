@@ -238,7 +238,20 @@ Controller의 학습 목표는 **style label이 주어졌을 때 어떤 effect�
 #### 생성 절차
 
 ```
-for each audio file A (1,570개):
+# [Phase 0] 원본 오디오 split 구성 (build_audio_splits.py)
+for each audio file in data/original/audio/ (4,174 클립):
+    track_id ← 파일명 suffix 제거로 parent track 추론
+               # e.g. "blues - blues 001 - 2.mp3" → "blues::blues_blues_001"
+
+for each parent track_id (고유 트랙):
+    해당 track의 클립 목록을 shuffle
+    train : val : test = 8 : 1 : 1 비율로 분배
+    # 동일 트랙의 클립이 각 split에 분산 → data leakage 방지
+
+→ train 1,570 / val 1,302 / test 1,302
+
+# [Phase A-2] Inverse Mapping DB 생성
+for each audio clip A in train split (1,570개):
     for each augmentation (60회):
         1. effect 조합 무작위 샘플링 (1~2개, 7종 중)
         2. 각 effect의 파라미터 무작위 샘플링 (param_min_intensity=0.35 이상 강도 보장)
