@@ -129,11 +129,33 @@ cross-modal alignment를 별도로 학습하지 않고, 두 모델의 **공유 l
 
 **생성 방식:**
 
-- vocab 각 term에 대해 8개의 prompt template으로 앙상블 임베딩 생성
-  - img: `"a {word} image"`, `"a {word} photograph"`, `"artwork with a {word} atmosphere"` 등
-  - aud: `"a {word} sound"`, `"a {word} music track"`, `"a {word} sonic texture"` 등
-- CLIP: `V_img` (24×768-dim), CLAP: `V_aud` (24×512-dim)
-- $\text{style\_score} = \text{softmax}\!\left(\frac{\delta z \cdot V}{\,T\,}\right)$ → 24-dim 확률 분포
+각 vocab term을 단일 template으로 임베딩하면 특정 표현 방식에 민감해질 수 있다.
+→ 동일 concept을 다양한 문장으로 표현한 8개 template을 앙상블하여 term embedding을 안정화한다.
+
+**IMG prompt templates (8개):**
+```
+"a {word} image"            "a {word} photograph"
+"an image with a {word} mood"  "a {word} visual style"
+"a {word} scene"            "a {word} picture"
+"a photo that feels {word}" "artwork with a {word} atmosphere"
+```
+
+**AUD prompt templates (8개):**
+```
+"a {word} sound"            "a {word} music track"
+"audio with a {word} mood"  "a {word} sonic texture"
+"a {word} musical atmosphere"  "a {word} sounding track"
+"music that feels {word}"   "a {word} audio style"
+```
+
+**앙상블 과정:**
+1. 각 keyword × 8 template = 8개 문장을 CLIP/CLAP text encoder로 임베딩
+2. 각 임베딩을 L2 normalize
+3. 8개 평균 → 다시 L2 normalize → term embedding 1개
+
+→ CLIP: `V_img` (24×768-dim), CLAP: `V_aud` (24×512-dim)
+
+$$\text{style\_score} = \text{softmax}\!\left(\frac{\delta z \cdot V}{\,T\,}\right) \rightarrow \text{24-dim 확률 분포}$$
 
 ---
 
