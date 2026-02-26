@@ -297,4 +297,4 @@ inference:
 
 # === Output ===
 output:
-  dir: "outputs/attempts/attempt12_20260225_085718/run"
+  dir: "outputs/attempts/attempt14/run"

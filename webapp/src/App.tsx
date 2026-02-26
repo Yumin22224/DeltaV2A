@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { fetchPreview, runInfer, checkHealth } from './api'
+import { fetchPreview, runInfer, checkHealth, getApiUrl, setApiUrl } from './api'
 import type { InferResult, EffectSelection } from './types'
 import { ImageUpload } from './components/ImageUpload'
 import { EffectPanel } from './components/EffectPanel'
@@ -23,6 +23,16 @@ export default function App() {
   const [inferError, setInferError] = useState<string | null>(null)
 
   const [serverReady, setServerReady] = useState<boolean | null>(null)
+  const [backendUrl, setBackendUrl] = useState(() => getApiUrl())
+  const [urlEditing, setUrlEditing] = useState(false)
+  const urlInputRef = useRef<HTMLInputElement>(null)
+
+  const commitUrl = useCallback((url: string) => {
+    setApiUrl(url)
+    setBackendUrl(url)
+    setUrlEditing(false)
+    checkHealth().then(setServerReady)
+  }, [])
 
   useEffect(() => {
     checkHealth().then(setServerReady)
@@ -79,11 +89,35 @@ export default function App() {
           <h1 className="text-lg font-bold tracking-tight">DeltaV2A Demo</h1>
           <p className="text-xs text-gray-400 mt-0.5">Image delta → style label → audio effect prediction</p>
         </div>
-        <div className="flex items-center gap-2 text-xs text-gray-500">
+        <div className="flex items-center gap-3 text-xs text-gray-500">
           <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
             serverReady === null ? 'bg-yellow-400 animate-pulse' : serverReady ? 'bg-green-500' : 'bg-red-500'
           }`} />
-          {serverReady === null ? 'Connecting…' : serverReady ? 'Server ready' : 'Server offline'}
+          <span>{serverReady === null ? 'Connecting…' : serverReady ? 'Server ready' : 'Server offline'}</span>
+          <span className="text-gray-200">|</span>
+          {urlEditing ? (
+            <input
+              ref={urlInputRef}
+              type="text"
+              defaultValue={backendUrl}
+              placeholder="http://localhost:8000"
+              autoFocus
+              onBlur={e => commitUrl(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') commitUrl((e.target as HTMLInputElement).value)
+                if (e.key === 'Escape') { setUrlEditing(false); setBackendUrl(getApiUrl()) }
+              }}
+              className="font-mono text-xs text-gray-600 border border-gray-300 px-2 py-0.5 w-56 focus:outline-none focus:border-gray-500"
+            />
+          ) : (
+            <button
+              onClick={() => setUrlEditing(true)}
+              className="font-mono text-gray-400 hover:text-gray-600 truncate max-w-56 text-left"
+              title="Click to change backend URL"
+            >
+              {backendUrl || 'set backend URL'}
+            </button>
+          )}
         </div>
       </header>
 

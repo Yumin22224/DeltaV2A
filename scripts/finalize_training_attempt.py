@@ -331,6 +331,8 @@ def main():
 
     mlp_report_path = run_dir / "controller" / "analysis" / "analysis_report.json"
     mlp_report = _load_json(mlp_report_path) if mlp_report_path.exists() else {}
+    # AR controller is archived (attempt9+): use empty report stub
+    ar_analysis_report: Dict = {}
     loss_metric_summary_path = attempt_dir / "notes" / "model_loss_metric_summary.md"
     _write_loss_metric_summary(
         path=loss_metric_summary_path,
