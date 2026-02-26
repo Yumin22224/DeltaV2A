@@ -176,7 +176,7 @@ Controller 학습 시 본 CLAP-side label 분포와, 추론 시 CLIP-side label 
 **캘리브레이션 과정:**
 
 **Stage 1 — Temperature & Norm Confidence 탐색:**
-실제 wand-effect image 쌍 5,250개에 CLIP을 적용해 $\delta z$를 계산한 뒤, $(T, \tau_c, s_c)$ 조합을 grid search. CLIP-side top-1 mass의 기댓값이 학습 CLAP-side 평균 top-1 mass와 일치하도록 최적화:
+Places365 원본 이미지 750장에 7종 wand effect를 각각 적용한 image 쌍 5,250개(750×7)에 CLIP을 적용해 $\delta z$를 계산한 뒤, $(T, \tau_c, s_c)$ 조합을 grid search. CLIP-side top-1 mass의 기댓값이 학습 CLAP-side 평균 top-1 mass와 일치하도록 최적화:
 
 $$\min_{T,\,\tau_c,\,s_c} \left| E_{\text{CLIP-side}}[\text{top-1 mass}] - E_{\text{CLAP-side}}[\text{top-1 mass}] \right|$$
 
@@ -224,6 +224,16 @@ Controller의 학습 목표는 **style label이 주어졌을 때 어떤 effect�
 이를 위한 데이터셋을 **Inverse Mapping Database**라 부른다.
 
 직접적인 (image delta, audio delta) 쌍 데이터를 수집하는 것은 불가능하다. 대신, 오디오에 무작위 effect 조합을 적용하고 결과로 발생하는 CLAP delta를 style label로 변환하여 `(style_label → effect params)`의 역방향 매핑 레코드를 대량으로 생성한다.
+
+#### 원본 데이터셋
+
+| 도메인 | 출처 | 구성 |
+|--------|------|------|
+| **Audio** | GTZAN (blues/classical/country/disco/hiphop/jazz/metal/pop/reggae/rock) + Bandcamp CC (techno) | 4,174 클립 → train 1,570 / val 1,302 / test 1,302 |
+| **Image** | MIT Places365 validation set (butte, cliff, coast, creek, desert_sand, glacier, hot_spring, ice_floe, iceberg, mountain_snowy, ocean, valley, volcano, waterfall, wheat_field) | 15개 자연 scene × 50장 = 750장 |
+
+- DB 생성: train split 1,570개 오디오 클립 사용
+- Calibration: 750장 이미지 × 7종 wand effect = **5,250 image pair** 사용
 
 #### 생성 절차
 
