@@ -119,8 +119,9 @@ STYLE_AXES_PHASES = [
 
 **Cross-modal Identity Mapping Assumption:**
 추론 시 `aud_style_scores = img_style_scores`로 직접 사용.
-CLIP image delta와 CLAP audio delta가 동일한 vocab 분포를 형성한다는 가정이며,
-이 가정의 타당성은 [Experiment 2]에서 진단한다.
+CLIP과 CLAP은 모두 language supervision으로 학습되었기 때문에, 24개 vocab term("warm", "dark", "ethereal" 등)의 의미를 동일하게 이해한다는 가정.
+즉, V_img와 V_aud는 같은 의미 개념을 표현하고 있으므로, CLIP delta로 계산한 style score와 CLAP delta로 계산한 style score는 동일한 perceptual 변화에 대해 동일한 분포를 가진다.
+cross-modal alignment를 별도로 학습하지 않고, 두 모델의 **공유 language space**를 modality 간 bridge로 삼는다.
 
 ---
 
