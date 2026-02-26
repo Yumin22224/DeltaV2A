@@ -74,9 +74,9 @@ def _print_install_instructions():
 
 
 def _stream_tunnel_output(proc: subprocess.Popen, url_found: threading.Event):
-    """Read cloudflared stderr line by line, extract and print the tunnel URL."""
+    """Read cloudflared output line by line, extract and print the tunnel URL."""
     url_pattern = re.compile(r'https://[a-zA-Z0-9\-]+\.trycloudflare\.com')
-    for line in proc.stderr:
+    for line in proc.stdout:
         line = line.rstrip()
         match = url_pattern.search(line)
         if match:
@@ -152,8 +152,8 @@ def main():
     print("[demo] Starting Cloudflare Quick Tunnel...")
     tunnel_proc = subprocess.Popen(
         tunnel_cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,  # merge stderr->stdout so we capture all output
         text=True,
         encoding="utf-8",
         errors="replace",
@@ -174,6 +174,7 @@ def main():
         args=(tunnel_proc, url_found),
         daemon=True,
     )
+
 
     t_server.start()
     t_tunnel.start()
