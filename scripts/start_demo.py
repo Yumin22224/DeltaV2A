@@ -22,9 +22,11 @@ Press Ctrl+C to stop both server and tunnel.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -73,32 +75,35 @@ def _print_install_instructions():
     print()
 
 
-def _stream_tunnel_output(proc: subprocess.Popen, url_found: threading.Event):
-    """Read cloudflared output line by line, extract and print the tunnel URL."""
+def _tail_tunnel_log(logfile_path: str, url_found: threading.Event, stop: threading.Event):
+    """Poll a log file for the tunnel URL (avoids pipe-buffering issues on Windows)."""
     url_pattern = re.compile(r'https://[a-zA-Z0-9\-]+\.trycloudflare\.com')
-    for line in proc.stdout:
-        line = line.rstrip()
-        match = url_pattern.search(line)
-        if match:
-            url = match.group(0)
-            print()
-            print("=" * 60)
-            print(f"  Tunnel URL: {url}")
-            print()
-            print("  Paste this URL into the Vercel frontend header")
-            print("  (click the URL field in the top-right corner).")
-            print("=" * 60)
-            print()
-            url_found.set()
-        else:
-            # Only show cloudflared lines that look useful (suppress verbose INF lines)
-            if any(kw in line for kw in ("ERR", "error", "failed", "Unable")):
+    with open(logfile_path, "r", encoding="utf-8", errors="replace") as f:
+        while not stop.is_set():
+            line = f.readline()
+            if not line:
+                time.sleep(0.2)
+                continue
+            line = line.rstrip()
+            match = url_pattern.search(line)
+            if match:
+                url = match.group(0)
+                print()
+                print("=" * 60)
+                print(f"  Tunnel URL: {url}")
+                print()
+                print("  Paste this URL into the Vercel frontend header")
+                print("  (click the URL field in the top-right corner).")
+                print("=" * 60)
+                print()
+                url_found.set()
+            elif any(kw in line for kw in ("ERR", "error", "failed", "Unable")):
                 print(f"[tunnel] {line}")
 
 
 def _stream_server_output(proc: subprocess.Popen, prefix: str = "[server]"):
     for line in proc.stdout:
-        print(f"{prefix} {line.rstrip()}")
+        print(f"{prefix} {line.rstrip()}", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -149,17 +154,22 @@ def main():
     # Give the server a moment to start binding the port
     time.sleep(2)
 
+    # Write cloudflared output to a temp file to avoid Windows pipe-buffering issues.
+    # The tail thread reads from the file with polling instead of blocking on a pipe.
     print("[demo] Starting Cloudflare Quick Tunnel...")
+    tunnel_logfile = tempfile.NamedTemporaryFile(
+        mode="wb", suffix=".log", delete=False, prefix="cloudflared_"
+    )
+    tunnel_logfile_path = tunnel_logfile.name
     tunnel_proc = subprocess.Popen(
         tunnel_cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,  # merge stderr->stdout so we capture all output
-        text=True,
-        encoding="utf-8",
-        errors="replace",
+        stdout=tunnel_logfile,
+        stderr=subprocess.STDOUT,
     )
+    tunnel_logfile.close()  # subprocess holds it open; we open separately for reading
 
     url_found = threading.Event()
+    stop_tail = threading.Event()
 
     # Thread: stream server logs to stdout
     t_server = threading.Thread(
@@ -168,13 +178,12 @@ def main():
         daemon=True,
     )
 
-    # Thread: parse tunnel output for the public URL
+    # Thread: tail tunnel log file for the public URL
     t_tunnel = threading.Thread(
-        target=_stream_tunnel_output,
-        args=(tunnel_proc, url_found),
+        target=_tail_tunnel_log,
+        args=(tunnel_logfile_path, url_found, stop_tail),
         daemon=True,
     )
-
 
     t_server.start()
     t_tunnel.start()
@@ -183,7 +192,6 @@ def main():
 
     try:
         while True:
-            # Check if either subprocess died unexpectedly
             if server_proc.poll() is not None:
                 print(f"\n[demo] Server exited (code {server_proc.returncode}). Stopping.")
                 break
@@ -194,6 +202,7 @@ def main():
     except KeyboardInterrupt:
         print("\n[demo] Shutting down...")
     finally:
+        stop_tail.set()
         tunnel_proc.terminate()
         server_proc.terminate()
         try:
@@ -204,6 +213,10 @@ def main():
             tunnel_proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             tunnel_proc.kill()
+        try:
+            os.unlink(tunnel_logfile_path)
+        except OSError:
+            pass
         print("[demo] Done.")
 
 
