@@ -381,6 +381,27 @@ $$w_{\text{act}} = 0.6,\quad w_{\text{param}} = 1.0$$
 
 ---
 
+### Post-Training: Activity Threshold Tuning
+
+학습 완료 후, activity head의 per-effect threshold를 validation set에서 별도 최적화한다.
+
+**목적:** 기본 threshold=0.5는 effect별 활성화 빈도 불균형을 고려하지 않는다.
+단순 F1 최대화가 아닌, threshold가 실제 파라미터 예측 품질에 미치는 영향을 직접 목적함수로 삼는다.
+
+**과정:**
+1. Validation set 전체 inference → activity logits + params_pred 수집
+2. $p = \sigma(\text{logits})$
+3. 탐색 공간: 0.05 ~ 0.95 균등 분할 **37개 grid**
+4. **목적함수: `active_param_rmse_gated`**
+   - 각 threshold 후보에서 predicted-inactive effect의 params를 bypass 값으로 gate
+   - gate 적용 후 ground-truth active params에 대해서만 RMSE 계산
+5. **Coordinate descent** (2 passes): 7개 effect를 순서대로 하나씩 고정하고 나머지 탐색, 2회 반복
+
+→ effect별로 `active_param_rmse_gated`를 최소화하는 threshold가 결정됨.
+이 per-effect threshold가 추론 시 `activity_threshold_override: null` 설정으로 그대로 적용된다.
+
+---
+
 ## Results — Quantitative
 
 **Primary metric: Active Param RMSE (gated)**
