@@ -175,6 +175,19 @@ $$\text{style\_score} = \text{softmax}\!\left(\frac{\delta z \cdot V}{\,T\,}\rig
 
 #### Effect별 Style F1 (linear probe: style label → effect 분류)
 
+**Linear probe 방법론:**
+- **입력**: training DB의 style_label (24-dim)
+- **레이블**: 해당 레코드 생성 시 이 effect가 활성화됐는가? (effect별 binary)
+- **모델**: Logistic Regression (단일 선형 레이어) — sklearn `LogisticRegression`
+- **분할**: training DB에서 80/20 train/test split
+- **지표**: F1 score (class imbalance 때문에 accuracy 대신)
+
+**Linear probe를 쓰는 이유:**
+style label의 **기하학적 구조**를 진단하기 위해서다.
+"이 effect가 활성화됐을 때의 style label"이 "비활성화됐을 때"와 선형적으로 분리되는가?
+비선형 분류기를 쓰면 표현력의 한계가 가려지므로, 선형 분류기로 style label 공간의 선형 분리 가능성만 측정한다.
+F1이 낮으면 → 해당 effect의 활성화 여부가 style label에 선형적으로 인코딩되어 있지 않다 → Controller도 style label만으로는 구분이 어렵다.
+
 | Effect | F1 |
 |--------|----|
 | distortion | **0.742** |
