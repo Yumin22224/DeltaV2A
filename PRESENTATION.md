@@ -276,9 +276,9 @@ Identity mapping assumption 하에, 두 분포는 동일하다고 가정되므�
 
 1. **활성 effect 수의 implicit 제한:** 학습 데이터의 active effect 수가 1~2개로 제한되어 있어, 추론 시 그 이상의 동시 활성화를 잘 일반화하지 못할 수 있다.
 
-2. **최소 강도 편향:** `param_min_intensity=0.35`로 약한 강도의 effect는 학습 데이터에 거의 포함되지 않는다. Controller가 subtle한 effect 적용에 대해 과소 예측할 가능성이 있다.
+2. **최소 강도 편향:** `param_min_intensity=0.35`는 각 파라미터를 자신의 range와 scale(linear/log)로 `[0,1]` 정규화한 normalized 공간에서 bypass까지의 거리가 0.35 이상이 되도록 샘플링한다. 즉 raw 단위의 스케일 차이는 정규화로 보정되어 있으며, 0.35는 전체 동적 범위 중 35% 이상 강도를 보장하는 기준이다. 그 결과 subtle한 effect(normalized distance < 0.35)는 학습 데이터에 거의 없고, Controller가 약한 강도의 effect를 과소 예측할 가능성이 있다.
 
-3. **고정된 effect chain 순서:** Pedalboard effect는 lowpass → bitcrush → reverb → highpass → distortion → delay → playback_rate 순서로 고정. 생성 데이터가 항상 이 순서로 만들어지므로, Controller는 순서 의존적인 음향 특성을 학습하지 못한다.
+3. **고정된 effect chain 순서:** DB 생성 시 Pedalboard effect는 항상 lowpass → bitcrush → reverb → highpass → distortion → delay → playback_rate 순서로 렌더링된다. Controller는 이 순서로만 만들어진 (style_label, params) 쌍으로 학습되므로, 다른 체인 순서에서 발생하는 음향적 상호작용을 한 번도 본 적이 없다. 이는 MLP가 순서를 처리하지 못해서가 아니라, DB 자체가 단일 순서로 고정되어 있어 학습 분포에 순서 다양성이 없기 때문이다.
 
 4. **Style label의 변별력 한계 상속:** DB의 style label이 effect를 잘 구분하지 못하는 경우 (delay F1=0.275, bitcrush F1=0.163), Controller도 해당 effect를 정확하게 예측하기 어렵다.
 
