@@ -287,12 +287,17 @@ Identity mapping assumption 하에, 두 분포는 동일하다고 가정되므�
 ### Controller 구조 (총 191K params)
 
 ```
-Input: style_label (24-dim)              CLAP(A) (512-dim) [입력 오디오 A의 timbral embedding]
-  └─ MLP backbone:                             │
-       Linear(24 → 256) → ReLU → Dropout(0.3) │ gated residual
-       Linear(256 → 256) → ReLU → Dropout(0.3)│ (gate = sigmoid, bias=-2.0)
-       Linear(256 → 128) → ReLU ←─────────────┘ (기본 거의 닫힘 → CLAP 기여 억제)
-  ├─ Activity head: Linear(128 → 7) + Sigmoid   → 7개 effect 이진 활성화 예측
+Input: style_label (24-dim)
+  └─ MLP backbone:
+       Linear(24  → 256) → LayerNorm(256) → ReLU → Dropout(0.3)
+       Linear(256 → 256) → LayerNorm(256) → ReLU → Dropout(0.3)
+       Linear(256 → 128) → LayerNorm(128) → ReLU → Dropout(0.3)
+                    ↓ style_feat (128-dim)
+  [Gated Residual]
+       gate       = σ( Linear(128→128)(style_feat) + bias=-2.0 )
+       audio_feat = Linear(512→128) → LayerNorm(128) → ReLU → Dropout(0.3)  ← CLAP(A) (512-dim)
+       feat_final = style_feat + gate × audio_feat    (기본 gate≈0.12 → CLAP 기여 억제)
+  ├─ Activity head: Linear(128 → 7)             → logits  [추론 시 sigmoid 적용]
   └─ Param head:   Linear(128 → 12) + Sigmoid  → 12개 파라미터 [0,1] 예측
 ```
 
@@ -308,7 +313,7 @@ $$L_{\text{ASL}}(y_i, p_i) = \begin{cases} (1-p_i)^{\gamma_+} \log(p_i) & \text{
 
 $$p_i^- = \max(p_i - m,\; 0), \quad \gamma_+ = 0,\; \gamma_- = 5,\; m = 0.05$$
 
-- **$\gamma_- = 5$:** false negative (놓친 effect)에 강한 페널티 — effect가 실제로 없는데 있다고 예측하는 것보다, 있는데 없다고 예측하는 것을 더 강하게 억제
+- **$\gamma_- = 5$:** 쉬운 negative sample의 gradient를 억제하여, 실제 비활성 effect를 높은 확률로 예측하는 어려운 케이스(false positive)에 집중 — 없는데 있다고 강하게 확신하는 경우에 더 강한 페널티
 - **$m = 0.05$ (margin clip):** 낮은 확률의 negative sample에서 gradient를 0으로 만들어 쉬운 negative에 과도하게 집중하지 않도록
 
 #### Param Loss — Huber Loss
@@ -328,17 +333,20 @@ $$L_{\text{Huber}}(\hat{p}, p; \delta) = \begin{cases} \dfrac{(\hat{p} - p)^2}{2
 | playback_rate | 1.5 |
 | distortion | 1.0 |
 
-#### Activity Mismatch Penalty
+#### Activity Mismatch Multiplier
 
-Activity 예측이 틀렸을 때 param loss에 추가 패널티:
+Mismatch penalty는 별도 항이 아니라 **Activity Loss 내부에 multiplier로 포함**된다.
+ASL 각 element에 예측 불확실성 기반 가중치를 곱한다:
 
-$$L_{\text{mismatch}}(y_i^{\text{act}}, \hat{y}_i^{\text{act}}) = \gamma_{\text{mm}}^2 \cdot w_{\text{mm}} \cdot \mathbb{1}[\hat{y}_i^{\text{act}} \neq y_i^{\text{act}}]$$
+$$L_{\text{act}} = \text{mean}\!\left(L_{\text{ASL,elem}} \cdot \left(1 + w_{\text{mm}} \cdot (1 - p_t)^{\gamma_{\text{mm}}}\right)\right)$$
 
-$$\gamma_{\text{mm}} = 2.0,\; w_{\text{mm}} = 2.0$$
+$$p_t = y \cdot p + (1-y) \cdot (1-p), \quad w_{\text{mm}} = 2.0,\; \gamma_{\text{mm}} = 2.0$$
+
+→ $p_t$가 낮을수록 (예측이 틀렸거나 불확실할수록) multiplier가 커져 해당 element에 더 강한 페널티.
 
 #### Total Loss
 
-$$L_{\text{total}} = w_{\text{act}} \cdot L_{\text{activity}} + w_{\text{param}} \cdot L_{\text{param}} + L_{\text{mismatch}}$$
+$$L_{\text{total}} = w_{\text{param}} \cdot L_{\text{param}} + w_{\text{act}} \cdot L_{\text{act}}$$
 
 $$w_{\text{act}} = 0.6,\quad w_{\text{param}} = 1.0$$
 
